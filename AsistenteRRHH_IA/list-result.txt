@@ -1,0 +1,8 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "Found 1 notebooks:\n\n- **RRHH** | 5 sources\n  ID: 8895bf27-73cb-4b3f-bfd0-1e840afc69b4"
+    }
+  ]
+}
