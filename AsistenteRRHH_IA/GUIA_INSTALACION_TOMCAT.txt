@@ -1,0 +1,34 @@
+GUÍA DE DESPLIEGUE EN APACHE TOMCAT
+===================================
+
+PASO 0: REPARAR AUTENTICACIÓN (IMPORTANTE)
+Antes de nada, el sistema no conectará con NotebookLM porque la sesión caducó.
+1. Ejecuta en la terminal: node manual_auth.cjs
+2. Sigue las instrucciones para pegar tu cookie de Google.
+3. Sin esto, el asistente dará Error 401.
+
+PASO 1: INSTALAR EL BACKEND (Node.js como Servicio)
+No podemos correr Node dentro de Tomcat, así que lo instalaremos como un Servicio de Windows.
+1. Abre una terminal (CMD o PowerShell) como ADMINISTRADOR.
+2. Navega a la carpeta del proyecto:
+   cd c:\AI\AsistenteRRHH_IA
+3. Ejecuta el instalador del servicio:
+   node install_service.cjs
+4. Si todo va bien, verás "Servicio instalado y arrancado".
+   (El servicio se llama "Asistente RRHH IA Backend").
+
+PASO 2: DESPLEGAR EL FRONTEND (Tomcat)
+1. He generado la carpeta "dist" con la compilación para Tomcat.
+2. Ve a tu carpeta de "webapps" en Tomcat (ej: C:\Program Files\Apache...\webapps).
+3. Crea una carpeta llamada EXACTAMENTE: AsistenteRRHH
+   (Si usas otro nombre, no cargará porque la configuración base es /AsistenteRRHH/).
+4. Copia TODO el contenido de la carpeta "dist" (de este proyecto) DENTRO de "webapps/AsistenteRRHH".
+5. Reinicia Tomcat si es necesario.
+   Tu app estará en: http://localhost:8080/AsistenteRRHH/
+
+PASO 3: CONEXIÓN API
+El frontend intentará conectar a /api/query.
+Como Tomcat no tiene esa API (la tiene el servicio Node en el puerto 3000), fallará.
+Solución recomendada:
+- Instala "UrlRewriteFilter" en Tomcat para redirigir /api -> localhost:3000/api.
+- O bien, asegúrate de que el puerto 3000 esté abierto en el Firewall y accesible para los clientes.

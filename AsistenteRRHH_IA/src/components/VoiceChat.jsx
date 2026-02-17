@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence, useMotionValue, useTransform } from 'framer-motion';
 import notebookLMClient from '../utils/notebookLMClient';
 import IntentEngine from '../utils/NexusIntentEngine'; // Updated import
+import { API_BASE_URL } from '../utils/apiConfig';
 import NexusCore from './NexusCore';
 import CompanyLogo from './CompanyLogo';
 import TypewriterText from './TypewriterText';
@@ -252,7 +253,7 @@ const VoiceChat = () => {
             const formData = new FormData();
             formData.append('audio', audioBlob, 'recording.webm');
 
-            const response = await fetch('/api/transcribe', {
+            const response = await fetch(`${API_BASE_URL}/api/transcribe`, {
                 method: 'POST',
                 body: formData
             });

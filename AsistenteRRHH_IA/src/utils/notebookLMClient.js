@@ -5,19 +5,19 @@
 
 import IntentEngine from './NexusIntentEngine.js';
 import QuickCache from './QuickCache.js';
+import { API_BASE_URL } from './apiConfig.js';
 
 class NotebookLMClient {
     constructor() {
         this.conversationId = null;
-        // Usar el proxy de Vite (/api) que funciona tanto en localhost como con ngrok
-        // El proxy de Vite redirige /api a http://localhost:3000
-        this.apiBaseUrl = '/api';
-        console.log('NotebookLM Client configured for HYBRID MODE (Local + Remote).');
+        // Usa la URL base configurada (absoluta en prod, relativa en dev)
+        this.apiBaseUrl = API_BASE_URL;
+        console.log('NotebookLM Client configured for HYBRID MODE (Local + Remote). API:', this.apiBaseUrl);
     }
 
     // Helper para enviar métricas al backend sin bloquear UI
     logAnalytics(type, data) {
-        fetch(`${this.apiBaseUrl}/analytics`, {
+        fetch(`${this.apiBaseUrl}/api/analytics`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ type, data })
@@ -26,7 +26,7 @@ class NotebookLMClient {
 
     async initialize() {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/health`);
+            const response = await fetch(`${this.apiBaseUrl}/api/health`);
             const data = await response.json();
             console.log('NotebookLM Backend Status:', data.status);
             return data.status === 'ready';
@@ -97,7 +97,7 @@ class NotebookLMClient {
             // La query final incluye el contexto, pero NO se muestra al usuario ni afecta la key de caché
             const finalRemoteQuery = timeContext + sanitizedQuery;
 
-            const response = await fetch(`${this.apiBaseUrl}/query`, {
+            const response = await fetch(`${this.apiBaseUrl}/api/query`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',

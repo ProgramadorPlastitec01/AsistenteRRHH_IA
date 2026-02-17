@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
+import { API_BASE_URL } from '../utils/apiConfig';
 
 const SystemStatus = () => {
     const [stats, setStats] = useState(null);
@@ -11,7 +12,7 @@ const SystemStatus = () => {
         setError(null);
         try {
             const start = performance.now();
-            const res = await fetch('/api/system-status');
+            const res = await fetch(`${API_BASE_URL}/api/system-status`);
             const networkLatency = Math.round(performance.now() - start);
 
             if (!res.ok) throw new Error('Error de conexión con Backend');

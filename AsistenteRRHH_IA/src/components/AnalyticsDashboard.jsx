@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
+import { API_BASE_URL } from '../utils/apiConfig';
 import SystemStatus from './SystemStatus';
 
 const AnalyticsDashboard = ({ onClose }) => {
@@ -11,7 +12,7 @@ const AnalyticsDashboard = ({ onClose }) => {
     const fetchAnalytics = async () => {
         setLoading(true);
         try {
-            const res = await fetch('/api/analytics');
+            const res = await fetch(`${API_BASE_URL}/api/analytics`);
             const data = await res.json();
             if (data.events) {
                 processEvents(data.events);

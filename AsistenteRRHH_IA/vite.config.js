@@ -4,6 +4,8 @@ import tailwindcss from '@tailwindcss/vite'
 
 // https://vite.dev/config/
 export default defineConfig({
+  // Cuando se compila para Tomcat, usa '/AsistenteRRHH/' como base. Sino, usa raíz.
+  base: process.env.TOMCAT === '1' ? '/AsistenteRRHH/' : '/',
   plugins: [
     react(),
     tailwindcss(),
