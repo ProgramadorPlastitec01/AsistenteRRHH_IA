@@ -9,7 +9,7 @@ const CompanyLogo = ({ className = "", size = 150 }) => {
             transition={{ duration: 0.6 }}
         >
             <img
-                src="/logo-plastitec.png"
+                src="logo-plastitec.png"
                 alt="Plastitec Logo"
                 style={{ width: `${size}px`, height: 'auto' }}
                 className="object-contain"

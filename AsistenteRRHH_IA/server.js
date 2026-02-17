@@ -52,6 +52,12 @@ const logAnalyticsEvent = (type, data) => {
 app.use(cors());
 app.use(express.json());
 
+// Fallback for SPA routing (Reloads on sub-pages)
+// (Moved to bottom of file)
+
+// Enable Mobile/Ngrok mode: Serve static frontend files directly
+app.use('/AsistenteRRHH', express.static(path.join(process.cwd(), 'dist')));
+
 // Verificar que la API key esté cargada
 console.log('🔑 Verificando API key de OpenAI...');
 if (process.env.OPENAI_API_KEY) {
@@ -576,6 +582,21 @@ app.use((err, req, res, next) => {
     res.status(500).json({
         error: 'Error interno del servidor. Por favor contacta con soporte técnico.'
     });
+});
+
+/**
+ * SPA Fallback for /AsistenteRRHH/ routing (must be after API routes)
+ */
+app.use((req, res, next) => {
+    // If it's a request to the main app path, serve index.html (SPA)
+    if (req.path.startsWith('/AsistenteRRHH/') && !req.path.includes('.')) {
+        return res.sendFile(path.join(process.cwd(), 'dist', 'index.html'));
+    }
+    // API 404
+    if (req.path.startsWith('/api')) {
+        return res.status(404).json({ error: 'Endpoint no encontrado' });
+    }
+    next();
 });
 
 /**
