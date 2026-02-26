@@ -54,17 +54,22 @@ const AnalyticsDashboard = ({ onClose }) => {
 
         let remoteCount = 0;
         let localCount = 0;
+        let cacheHits = 0;
         let savedTimeSeconds = 0;
 
         rawEvents.forEach(e => {
             const d = e.data || {};
             const source = d.source || (e.type === 'RemoteQuery' ? 'remote' : 'local');
+            const isCache = d.data?.cache_hit || false;
 
-            if (source === 'remote') {
+            if (isCache) {
+                cacheHits++;
+                localCount++;
+                savedTimeSeconds += 4.5; // Ahorro completo de consulta remota
+            } else if (source === 'remote') {
                 remoteCount++;
             } else {
                 localCount++;
-                // Ahorro: Si es local, ahorramos el tiempo promedio de una consulta remota (~4.5s)
                 savedTimeSeconds += 4.5;
             }
         });
@@ -73,6 +78,7 @@ const AnalyticsDashboard = ({ onClose }) => {
             total: rawEvents.length,
             remote: remoteCount,
             local: localCount,
+            cacheHits,
             savedTime: Math.round(savedTimeSeconds)
         });
     };
@@ -256,7 +262,7 @@ const AnalyticsDashboard = ({ onClose }) => {
                 ) : (
                     <>
                         {/* KPI Cards */}
-                        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+                        <div className="grid grid-cols-1 md:grid-cols-5 gap-4 mb-8">
                             <div className="bg-white/5 border border-white/10 p-4 rounded-xl">
                                 <div className="text-white/40 text-xs uppercase mb-1">Total Consultas</div>
                                 <div className="text-3xl font-bold text-white">{stats.total}</div>
@@ -266,17 +272,20 @@ const AnalyticsDashboard = ({ onClose }) => {
                                 <div className="text-3xl font-bold text-green-400">{stats.local}</div>
                                 <div className="text-[10px] text-green-400/40">Speed: &lt;10ms</div>
                             </div>
+                            <div className="bg-blue-500/10 border border-blue-500/20 p-4 rounded-xl">
+                                <div className="text-blue-400/60 text-xs uppercase mb-1">Smart Cache Hits</div>
+                                <div className="text-3xl font-bold text-blue-400">{stats.cacheHits || 0}</div>
+                                <div className="text-[10px] text-blue-400/40">Optimización: {stats.total > 0 ? Math.round((stats.cacheHits / stats.total) * 100) : 0}%</div>
+                            </div>
                             <div className="bg-purple-500/10 border border-purple-500/20 p-4 rounded-xl">
                                 <div className="text-purple-400/60 text-xs uppercase mb-1">Consultas Remotas</div>
                                 <div className="text-3xl font-bold text-purple-400">{stats.remote}</div>
                                 <div className="text-[10px] text-purple-400/40">NotebookLM AI</div>
                             </div>
-                            <div className="bg-blue-500/10 border border-blue-500/20 p-4 rounded-xl relative overflow-hidden">
-                                <div className="text-blue-400/60 text-xs uppercase mb-1">Tiempo Ahorrado</div>
-                                <div className="text-3xl font-bold text-blue-400">{stats.savedTime}s</div>
-                                <div className="text-[10px] text-blue-400/40">ROI Estimado</div>
-                                {/* Background decoration */}
-                                <div className="absolute -right-4 -bottom-4 text-blue-500/10 text-6xl">⏱️</div>
+                            <div className="bg-yellow-500/10 border border-yellow-500/20 p-4 rounded-xl relative overflow-hidden">
+                                <div className="text-yellow-400/60 text-xs uppercase mb-1">Tiempo Ahorrado</div>
+                                <div className="text-3xl font-bold text-yellow-400">{stats.savedTime}s</div>
+                                <div className="text-[10px] text-yellow-400/40">ROI Total</div>
                             </div>
                         </div>
 
@@ -309,8 +318,11 @@ const AnalyticsDashboard = ({ onClose }) => {
                                                     <div className="w-20 text-[10px] text-white/30 font-mono flex-shrink-0">
                                                         {new Date(e.timestamp || d.timestamp).toLocaleTimeString()}
                                                     </div>
-                                                    <div className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold border ${getBadgeColor(e.type)} w-32 text-center flex-shrink-0`}>
+                                                    <div className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold border ${getBadgeColor(e.type)} w-32 text-center flex-shrink-0 flex items-center justify-center gap-1`}>
                                                         {e.type.replace('Local', '').replace('Remote', '')}
+                                                        {d.data?.cache_hit && (
+                                                            <span title="Smart Cache Hit">⚡</span>
+                                                        )}
                                                     </div>
                                                     <div className="flex-grow text-sm text-white/80 truncate font-sans group-hover:text-white transition-colors">
                                                         "{d.query || e.query || '---'}"

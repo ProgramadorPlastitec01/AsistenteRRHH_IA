@@ -3,6 +3,7 @@ import { motion, AnimatePresence, useMotionValue, useTransform } from 'framer-mo
 import notebookLMClient from '../utils/notebookLMClient';
 import IntentEngine from '../utils/NexusIntentEngine'; // Updated import
 import logger from '../utils/logger';
+import conversationStore from '../utils/conversationStore';
 import { API_BASE_URL } from '../utils/apiConfig';
 import NexusCore from './NexusCore';
 import CompanyLogo from './CompanyLogo';
@@ -257,6 +258,33 @@ const VoiceChat = () => {
         // Telemetry
         logger.startConversation(queryText);
         logger.endPhase('transcription');
+
+        // 🧠 CACHE CHECK
+        const cachedResponse = conversationStore.getCachedResponse(queryText);
+        if (cachedResponse) {
+            console.log(`[VoiceChat] ⚡ Servido desde caché: "${queryText}"`);
+
+            dispatch({ type: 'START_PROCESSING', payload: queryText });
+
+            // Simular un pequeño retardo para feedback visual de que el sistema "piensa"
+            await new Promise(r => setTimeout(r, 600));
+
+            const totalTime = Math.round(performance.now() - logger.timers.total);
+
+            await logger.logConversation({
+                query: queryText,
+                status: 'success',
+                source: 'local', // Mark as local for cache hit
+                data: { cache_hit: true }
+            });
+
+            dispatch({ type: 'SET_RESPONSE', payload: cachedResponse });
+            speakText(cachedResponse);
+
+            isLocked.current = false;
+            return;
+        }
+
         logger.startPhase('backend');
 
         // FORCE PROCESSING STATE IMMEDIATELY (Critical to prevent onend race condition)
@@ -307,6 +335,19 @@ const VoiceChat = () => {
                 status: 'success',
                 source: isLocal ? 'local' : 'remote'
             });
+
+            // 💾 PERSISTENCE
+            conversationStore.saveConversation(logger.sessionId, {
+                conversation_id: logger.currentConversationId,
+                query: queryText,
+                response: finalResult,
+                source: isLocal ? 'local' : 'remote',
+                total_time_ms: Math.round(performance.now() - logger.timers.total),
+                status: 'success'
+            });
+
+            // 🧠 CACHE (Save for future hits)
+            conversationStore.setCachedResponse(queryText, finalResult);
 
             dispatch({ type: 'SET_RESPONSE', payload: finalResult });
             // State will be set to RESPONDING by speakText -> utterance.onstart
