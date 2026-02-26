@@ -27,11 +27,18 @@ class NotebookLMClient {
     async initialize() {
         try {
             const response = await fetch(`${this.apiBaseUrl}/api/health`);
+            if (!response.ok) {
+                // Server is running but erroring — log status, don't crash on .json()
+                const text = await response.text().catch(() => '');
+                console.warn(`Backend health check failed (HTTP ${response.status}):`, text.substring(0, 120));
+                return false;
+            }
             const data = await response.json();
             console.log('NotebookLM Backend Status:', data.status);
             return data.status === 'ready';
         } catch (error) {
-            console.error('No se pudo conectar con el servidor backend:', error);
+            // Network-level error (backend not running, DNS, etc.)
+            console.error('No se pudo conectar con el servidor backend:', error.message);
             return false;
         }
     }
@@ -83,19 +90,27 @@ class NotebookLMClient {
         try {
             console.log(`[HybridEngine] ☁️ Intentando conexión remota...`);
 
-            const controller = new AbortController();
-            // Timeout global de 45s para llamadas remotas complejas
-            const timeoutId = setTimeout(() => controller.abort(), 45000);
+            // Build a single abort signal.
+            // If the caller provides an external signal (e.g. user stops recording), link the
+            // internal 45 s safety timeout to it so clearTimeout fires on external abort too.
+            let signal;
+            let timeoutId;
+
+            if (options?.signal) {
+                signal = options.signal;
+                // Safety net: clear the timeout if the external signal fires first
+                timeoutId = setTimeout(() => {
+                    console.warn('[HybridEngine] Timeout interno de 65s alcanzado');
+                }, 65000);
+                signal.addEventListener('abort', () => clearTimeout(timeoutId), { once: true });
+            } else {
+                const controller = new AbortController();
+                signal = controller.signal;
+                timeoutId = setTimeout(() => controller.abort(), 65000);
+            }
 
             // Optimización de payload: Recortar espacios y limitar longitud
             const sanitizedQuery = queryText.trim().substring(0, 500);
-
-            // INYECCIÓN DE CONTEXTO TEMPORAL (Fase 1)
-            const now = new Date();
-            const timeContext = `[Contexto del Sistema: Fecha y hora actual: ${now.toLocaleString('es-MX', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' })}. Responde asumiendo esta fecha.]\n\n`;
-
-            // La query final incluye el contexto, pero NO se muestra al usuario ni afecta la key de caché
-            const finalRemoteQuery = timeContext + sanitizedQuery;
 
             const response = await fetch(`${this.apiBaseUrl}/api/query`, {
                 method: 'POST',
@@ -103,24 +118,34 @@ class NotebookLMClient {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    query: finalRemoteQuery, // Enviamos query enriquecida
+                    query: sanitizedQuery,
                     conversationId: this.conversationId
                 }),
-                signal: options?.signal || controller.signal
+                signal
             });
 
             clearTimeout(timeoutId);
 
             if (!response.ok) {
-                const errorText = await response.text();
+                const errorText = await response.text().catch(() => '');
+
+                if (!errorText) {
+                    // Empty body: backend running but crashed mid-handler, or Vite proxy error
+                    throw new Error(
+                        response.status === 503
+                            ? 'El servidor backend no está disponible. Por favor abre otra terminal y ejecuta: node server.js'
+                            : `Error del servidor (${response.status}). Verifica que node server.js esté corriendo.`
+                    );
+                }
+
                 try {
                     const errorData = JSON.parse(errorText);
                     throw new Error(errorData.error || `Error ${response.status}: ${response.statusText}`);
                 } catch (e) {
-                    // Si falla parsear el error como JSON, probablemente sea HTML
-                    console.error('Server error response:', errorText);
+                    if (e.message.startsWith('Error')) throw e; // already a useful message
+                    // Body is HTML or malformed
                     const snippet = errorText.substring(0, 100).replace(/<[^>]*>/g, '').trim();
-                    throw new Error(`Error del servidor (${response.status}): ${snippet || 'Respuesta inválida'}. Verifica el backend.`);
+                    throw new Error(`Error del servidor (${response.status}): ${snippet || 'Respuesta no válida'}. Verifica el backend.`);
                 }
             }
 

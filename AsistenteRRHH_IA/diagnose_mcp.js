@@ -8,6 +8,10 @@ async function diagnose() {
         const transport = new StdioClientTransport({
             command: 'npx',
             args: ['notebooklm-mcp-server', 'mcp'],
+            env: {
+                ...process.env,
+                NOTEBOOKLM_AUTH_FILE: process.cwd() + '\\auth.json'
+            }
         });
 
         const client = new Client({

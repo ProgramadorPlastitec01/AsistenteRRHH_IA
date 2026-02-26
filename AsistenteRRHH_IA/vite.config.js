@@ -3,9 +3,10 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 // https://vite.dev/config/
-export default defineConfig({
-  // Cuando se compila para Tomcat, usa '/AsistenteRRHH/' como base. Sino, usa raíz.
-  base: process.env.TOMCAT === '1' ? '/AsistenteRRHH/' : '/',
+export default defineConfig(({ mode }) => ({
+  // Use relative base for production so it works in any subpath (e.g. /AsistenteRRHH/, /App/, etc.)
+  // This is the standard for legacy Tomcat deployments
+  base: mode === 'production' ? './' : '/',
   plugins: [
     react(),
     tailwindcss(),
@@ -14,8 +15,6 @@ export default defineConfig({
     host: true, // Esto habilita el acceso desde la red local
     port: 5173,  // Puerto por defecto
     allowedHosts: [
-      '.ngrok-free.dev',  // Permitir todos los subdominios de ngrok
-      '.ngrok.io',        // Permitir subdominios antiguos de ngrok
       'localhost'         // Permitir localhost
     ],
     proxy: {
@@ -25,17 +24,24 @@ export default defineConfig({
         secure: false,
         rewrite: (path) => path,
         configure: (proxy, _options) => {
-          proxy.on('error', (err, _req, _res) => {
-            console.log('proxy error', err);
+          proxy.on('error', (err, _req, res) => {
+            // Backend not running or crashed — send a proper JSON error instead of hanging
+            console.warn('[Vite Proxy] Backend no disponible:', err.code, err.message);
+            if (res && !res.headersSent) {
+              res.writeHead(503, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({
+                error: 'Servidor backend no disponible. Asegúrate de que node server.js esté corriendo.',
+                code: err.code
+              }));
+            }
           });
           proxy.on('proxyReq', (proxyReq, req, _res) => {
-            console.log('Sending Request to the Target:', req.method, req.url);
-          });
-          proxy.on('proxyRes', (proxyRes, req, _res) => {
-            console.log('Received Response from the Target:', proxyRes.statusCode, req.url);
+            if (process.env.NODE_ENV !== 'production') {
+              console.log('[Proxy →]', req.method, req.url);
+            }
           });
         }
       }
     }
   }
-})
+}))

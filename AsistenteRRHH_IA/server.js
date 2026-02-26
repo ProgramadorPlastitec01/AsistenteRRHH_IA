@@ -16,22 +16,18 @@ import cors from 'cors';
 import 'dotenv/config';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import http from 'http';
-import OpenAI from 'openai';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
 import multer from 'multer';
 
-// Configure Multer for audio uploads
-const upload = multer({
-    storage: multer.memoryStorage(),
-    limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
-});
+// Multer is not longer needed as Whisper was removed
+// const upload = multer({ ... });
 
 const app = express();
 const PORT = 3000;
 const LOG_FILE = path.join(process.cwd(), 'analytics.jsonl');
+const ERRORS_FILE = path.join(process.cwd(), 'errors.jsonl');
 
 /**
  * Helper to log analytics events to JSONL file
@@ -48,35 +44,52 @@ const logAnalyticsEvent = (type, data) => {
     });
 };
 
-// Middleware
-app.use(cors());
+/**
+ * Helper to log system errors to JSONL file
+ */
+const logErrorEvent = (type, module, message, stack = null, details = {}) => {
+    const errorEvent = {
+        timestamp: new Date().toISOString(),
+        id: `${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+        type, // 'Backend' | 'Frontend' | 'Auth' | 'IA' | 'Mic' | 'Network'
+        module,
+        message,
+        stack: stack ? stack.split('\n').slice(0, 5).join('\n') : null, // Store only top of stack
+        status: 'pending',
+        details
+    };
+    fs.appendFile(ERRORS_FILE, JSON.stringify(errorEvent) + '\n', (err) => {
+        if (err) console.error('Error writing to errors log:', err);
+    });
+};
+
+// Absolute paths for robustness
+const APP_ROOT = process.cwd();
+const AUTH_FILE_PATH = path.join(APP_ROOT, 'auth.json');
+
+// Middleware — CORS: allow configured origins or all in dev
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(',')
+    : null;
+app.use(cors(allowedOrigins ? {
+    origin: (origin, callback) => {
+        // Allow same-origin requests (no origin) and explicitly listed origins
+        if (!origin || allowedOrigins.some(o => origin.startsWith(o.trim()))) {
+            callback(null, true);
+        } else {
+            callback(new Error(`CORS blocked: ${origin}`));
+        }
+    }
+} : {}));
 app.use(express.json());
 
-// Fallback for SPA routing (Reloads on sub-pages)
-// (Moved to bottom of file)
-
-// Enable Mobile/Ngrok mode: Serve static frontend files directly
-app.use('/AsistenteRRHH', express.static(path.join(process.cwd(), 'dist')));
-
-// Verificar que la API key esté cargada
-console.log('🔑 Verificando API key de OpenAI...');
-if (process.env.OPENAI_API_KEY) {
-    console.log('✅ OPENAI_API_KEY cargada correctamente (longitud:', process.env.OPENAI_API_KEY.length, 'caracteres)');
-} else {
-    console.warn('⚠️ OPENAI_API_KEY NO encontrada en .env');
-}
-
-// Configure Persistent Keep-Alive Agent for internal requests
-const keepAliveAgent = new http.Agent({
-    keepAlive: true,
-    keepAliveMsecs: 5000, // 5 seconds initial delay
-    maxSockets: 50,       // Allow concurrency
-    timeout: 30000        // Socket timeout
-});
+// Serve static frontend files
+app.use('/AsistenteRRHH', express.static(path.join(APP_ROOT, 'dist')));
 
 // Configure long-running session parameters
 const SESSION_REFRESH_INTERVAL = 25 * 60 * 1000; // Refresh every 25 minutes (before typical 1h expiry)
 let authRefreshInterval = null;
+let authWatcherActive = false; // Prevents duplicate fs.watch listeners across initializeMCP() calls
 
 // MCP Client state
 let mcpClient = null;
@@ -92,9 +105,16 @@ async function initializeMCP() {
 
         // Create transport to communicate with MCP server
         const transport = new StdioClientTransport({
-            command: 'npx',
-            args: ['notebooklm-mcp-server', 'mcp'],
-            env: process.env
+            command: process.execPath,
+            args: [path.join(APP_ROOT, 'node_modules', 'notebooklm-mcp-server', 'dist', 'index.js'), 'mcp'],
+            env: {
+                ...process.env,
+                // Force MCP server to use our local auth.json file
+                NOTEBOOKLM_AUTH_FILE: AUTH_FILE_PATH,
+                // Suppress ANSI colors and unnecessary logs
+                NO_COLOR: 'true',
+                LOG_LEVEL: 'error'
+            }
         });
 
         // Create MCP client with increased timeout for complex queries
@@ -103,7 +123,7 @@ async function initializeMCP() {
             version: '1.0.0'
         }, {
             capabilities: {},
-            requestTimeout: 120000 // 120 seconds timeout
+            requestTimeout: 60000 // 60s — NotebookLM rarely exceeds this; avoids zombie requests
         });
 
         // Connect to MCP server
@@ -191,6 +211,22 @@ async function initializeMCP() {
             console.warn('⚠️ Passive session refresh failed (will retry next cycle):', e.message);
         }
     }, SESSION_REFRESH_INTERVAL);
+
+    // Watch for manual auth.json changes to auto-reload
+    // Guard flag prevents registering multiple watchers on successive calls to initializeMCP()
+    if (fs.existsSync(AUTH_FILE_PATH) && !authWatcherActive) {
+        authWatcherActive = true;
+        fs.watch(AUTH_FILE_PATH, async (eventType) => {
+            if (eventType === 'change') {
+                console.log('🔄 auth.json change detected. Re-initializing MCP...');
+                if (mcpClient) {
+                    try { await mcpClient.close(); } catch (e) { }
+                    isInitialized = false;
+                    await initializeMCP();
+                }
+            }
+        });
+    }
 }
 
 /**
@@ -247,6 +283,76 @@ app.get('/api/analytics', async (req, res) => {
 });
 
 /**
+ * Get system errors (last 100)
+ */
+app.get('/api/system-errors', async (req, res) => {
+    try {
+        if (!fs.existsSync(ERRORS_FILE)) {
+            return res.json({ errors: [] });
+        }
+
+        const data = await fs.promises.readFile(ERRORS_FILE, 'utf8');
+        const lines = data.trim().split('\n');
+
+        const errors = lines
+            .filter(line => line.trim())
+            .map(line => {
+                try { return JSON.parse(line); } catch (e) { return null; }
+            })
+            .filter(e => e !== null)
+            .reverse() // Most recent first
+            .slice(0, 100);
+
+        res.json({ errors });
+    } catch (error) {
+        console.error('Error reading system errors:', error);
+        res.status(500).json({ error: 'Failed to read logs' });
+    }
+});
+
+/**
+ * Resolve system error
+ */
+app.post('/api/system-errors/resolve', async (req, res) => {
+    const { id } = req.body;
+    if (!id) return res.status(400).json({ error: 'Missing error ID' });
+
+    try {
+        if (!fs.existsSync(ERRORS_FILE)) return res.status(404).json({ error: 'Log not found' });
+
+        const data = await fs.promises.readFile(ERRORS_FILE, 'utf8');
+        const lines = data.trim().split('\n');
+
+        const updatedLines = lines.map(line => {
+            if (!line.trim()) return line;
+            try {
+                const err = JSON.parse(line);
+                if (err.id === id) {
+                    err.status = 'resolved';
+                    return JSON.stringify(err);
+                }
+                return line;
+            } catch (e) { return line; }
+        });
+
+        await fs.promises.writeFile(ERRORS_FILE, updatedLines.join('\n') + '\n');
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error resolving error:', error);
+        res.status(500).json({ error: 'Failed to update log' });
+    }
+});
+
+/**
+ * External Error Logging (from Frontend)
+ */
+app.post('/api/report-error', (req, res) => {
+    const { type, module, message, stack, details } = req.body;
+    logErrorEvent(type, module, message, stack, details || {});
+    res.json({ success: true });
+});
+
+/**
  * System Status Endpoint (Health Monitor)
  */
 app.get('/api/system-status', async (req, res) => {
@@ -280,22 +386,11 @@ app.get('/api/system-status', async (req, res) => {
         status.services[2].status = 'degraded';
         status.services[2].message = 'Demo Mode (Simulated)';
     } else {
-        try {
-            // Ping ligero a NotebookLM (listar cuadernos es lo más barato)
-            // Limitamos a 5 segundos para no colgar el chequeo
-            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000));
-            const checkPromise = mcpClient.callTool({ name: 'notebook_list', arguments: {} });
-
-            await Promise.race([checkPromise, timeoutPromise]);
-
-            const latency = Date.now() - nlmStart;
-            status.services[2].latency = latency;
-            status.services[2].status = latency > 2500 ? 'degraded' : 'active';
-        } catch (e) {
-            status.services[2].latency = Date.now() - nlmStart;
-            status.services[2].status = 'error';
-            status.services[2].message = e.message === 'Timeout' ? 'High Latency (>5s)' : 'Connection Failed';
-        }
+        // B4 FIX: Do NOT make a live MCP round-trip here — it competes with real queries.
+        // Report status based on in-memory state (MCP client connected + notebook loaded).
+        status.services[2].status = mcpClient ? 'active' : 'error';
+        status.services[2].latency = 0; // No round-trip made
+        status.services[2].message = mcpClient ? undefined : 'MCP client not connected';
     }
 
     res.json(status);
@@ -305,9 +400,9 @@ app.get('/api/system-status', async (req, res) => {
  * Query endpoint - Main interface for frontend
  */
 app.post('/api/query', async (req, res) => {
+    const { query, conversationId } = req.body;
     try {
         const start = Date.now();
-        const { query, conversationId } = req.body;
 
         if (!query || typeof query !== 'string') {
             return res.status(400).json({
@@ -338,77 +433,100 @@ app.post('/api/query', async (req, res) => {
             });
         }
 
-        // Call NotebookLM query tool with prompt for detailed, structured responses
-        const enhancedQuery = `Actúa como el Asistente de Recursos Humanos IA de Plastitec. 
-IMPORTANTE: Mantén una ortografía y gramática PERFECTA. Escribe todas las palabras completas, sin abreviaturas ni omisiones de letras.
+        // B1 FIX/REFINEMENT: Apply strict constraints to force direct, grounded responses.
+        const enhancedQuery = `--------------------------------------------------
+INSTRUCCIONES CRÍTICAS PARA LA IA
+--------------------------------------------------
+1. Responde únicamente a lo que se pregunta.
+2. Usa solo información encontrada en NotebookLM.
+3. No agregues explicaciones adicionales.
+4. No describas los documentos consultados.
+5. No expliques el proceso de búsqueda.
+6. No agregues interpretaciones propias.
+7. No amplíes la respuesta con contexto innecesario.
+8. Si la información no existe en NotebookLM, responde exactamente:
+   "No se encontró información relacionada en los documentos disponibles."
 
-Si la pregunta es un saludo o simple, responde brevemente.
-Si el usuario pide un "resumen", "resumir" o pide específicamente un solo párrafo, DEBES responder OBLIGATORIAMENTE en un único párrafo conciso de máximo 5 líneas, sin usar listas ni títulos.
-En otros casos de políticas, normativas o procedimientos, usa este formato:
+FORMATO DE RESPUESTA OBLIGATORIO:
+- Un único bloque de respuesta.
+- Máximo 1–2 párrafos.
+- Lenguaje claro y profesional.
+- Sin introducciones como "Según la información proporcionada...", "De acuerdo con los documentos...", etc.
+--------------------------------------------------
 
-# Título
-**Resumen:** ...
-**Detalles:** ...
-**Contacto:** ...
+CONSULTA: ${query}`;
 
-Responde siempre en español y con un tono profesional pero cercano.
-P: ${query}`;
+        // Auth error pattern — B2 FIX: precise regex to avoid false positives on words like
+        // "autorización" or "autenticación de empleados" that would trigger a useless retry.
+        const AUTH_ERROR_RE = /\b(Authentication expired|re-authenticate|session expired|login required|401)\b/i;
 
-        const result = await mcpClient.callTool({
-            name: 'notebook_query',
-            arguments: {
-                notebook_id: notebookId,
-                query: enhancedQuery,
-                conversation_id: conversationId || undefined
-            }
-        });
+        const performQuery = async (retryCount = 0) => {
+            const mcpStart = Date.now();
+            console.log(`[Query] MCP call started at +${mcpStart - start}ms`);
 
-        // Extract response text
-        const rawText = result.content[0].text;
-        let responseText = rawText;
-        let finalConversationId = result.conversationId;
-
-        // Detectar si la respuesta es en realidad un error de autenticación (algunos servidores MCP lo devuelven como texto)
-        if (rawText.includes('Authentication expired') || rawText.includes('re-authenticate')) {
-            console.log('💡 Auth error detected in content. Returning 401.');
-            return res.status(401).json({
-                error: 'Error de autenticación con Google: La sesión ha expirado. Por favor, ejecuta "npx notebooklm-mcp-server auth" en una terminal para renovar tus credenciales.'
+            const result = await mcpClient.callTool({
+                name: 'notebook_query',
+                arguments: {
+                    notebook_id: notebookId,
+                    query: enhancedQuery,
+                    conversation_id: conversationId || undefined
+                }
             });
-        }
 
-        // Intentar parsear si el resultado es un JSON string (común en este servidor MCP)
+            const mcpLatency = Date.now() - mcpStart;
+            console.log(`[Query] MCP responded in ${mcpLatency}ms | Total so far: ${Date.now() - start}ms`);
+
+            const rawText = result.content[0].text;
+
+            // B2: only retry on genuine auth errors, not every occurrence of the substring
+            if (AUTH_ERROR_RE.test(rawText)) {
+                if (retryCount === 0) {
+                    console.log('💡 Auth error detected in content. Attempting refresh and retry...');
+                    await mcpClient.callTool({ name: 'refresh_auth', arguments: {} });
+                    return await performQuery(1);
+                }
+                throw new Error('Sesión expirada persistentemente. Por favor, ejecuta "npx notebooklm-mcp-server auth".');
+            }
+
+            return {
+                text: rawText,
+                conversationId: result.conversationId
+            };
+        };
+
+        const { text: rawText, conversationId: finalConversationId } = await performQuery();
+        const backendTotal = Date.now() - start;
+        console.log(`[Query] ✅ Complete. Backend total: ${backendTotal}ms`);
+
+        let responseText = rawText;
+        let finalId = finalConversationId;
+
+        // Intentar parsear si el resultado es un JSON string
         try {
             const parsed = JSON.parse(rawText);
             if (parsed.answer) responseText = parsed.answer;
-            if (parsed.conversation_id) finalConversationId = parsed.conversation_id;
-        } catch (e) {
-            // No es JSON, usar el texto tal cual
-        }
+            if (parsed.conversation_id) finalId = parsed.conversation_id;
+        } catch (e) { }
 
-        // Limpieza básica (solo referencias numéricas), conservando formato Markdown
+        // Limpieza básica (eliminando referencias estilo [1], [2])
         responseText = responseText
-            .replace(/\[\d+\]/g, '') // Quitar referencias tipo [1], [2]
+            .replace(/\[\d+\]/g, '')
             .trim();
 
-        // Check if response indicates information not found
-        const isOutOfScope =
-            responseText.toLowerCase().includes('no tengo información') ||
-            responseText.toLowerCase().includes('no encuentro') ||
-            responseText.toLowerCase().includes('no está en') ||
-            responseText.toLowerCase().includes('no hay información');
+        // Check if out of scope or not found
+        const isNotFound = responseText.includes("No se encontró información relacionada en los documentos disponibles");
 
-        // If out of scope, provide helpful redirect
-        if (isOutOfScope) {
+        if (isNotFound) {
             return res.json({
-                response: 'Lo siento, no tengo información específica sobre esa consulta en mi base de conocimientos actual. Te recomiendo que contactes directamente con el departamento de Recursos Humanos para obtener una respuesta precisa. Puedes visitarnos en la oficina 301 o llamar a la extensión 1234.',
+                response: responseText,
                 outOfScope: true,
-                conversationId: finalConversationId
+                conversationId: finalId
             });
         }
 
         // Log successful remote query
         logAnalyticsEvent('RemoteQuery', {
-            query, // original query without context
+            query,
             responseLength: responseText.length,
             latencyMs: Date.now() - start,
             notebookId
@@ -417,11 +535,21 @@ P: ${query}`;
         res.json({
             response: responseText,
             outOfScope: false,
-            conversationId: finalConversationId
+            conversationId: finalId
         });
 
     } catch (error) {
         console.error('Query error details:', error);
+
+        // Log detailed error to analytics for debugging
+        logAnalyticsEvent('QueryError', {
+            message: error.message,
+            stack: error.stack,
+            type: error.constructor.name
+        });
+
+        // Log to centralized error system
+        logErrorEvent('IA', 'QueryEngine', error.message, error.stack, { query });
 
         // Check for common errors
         const errorMessage = error.message || 'Unknown error';
@@ -431,112 +559,17 @@ P: ${query}`;
             errorMessage.includes('unauthorized') ||
             errorMessage.includes('login') ||
             errorMessage.includes('expired') ||
-            errorMessage.includes('authenticat')) {
-            console.log('💡 Auth error detected. Attempting to refresh cookies from disk...');
+            errorMessage.includes('authenticat') ||
+            errorMessage.includes('auth')) {
 
-            try {
-                // Intentar refrescar las cookies automáticamente si el usuario ya corrió el comando 'auth'
-                await mcpClient.callTool({ name: 'refresh_auth', arguments: {} });
-                console.log('✅ Cookies refreshed. Retrying query automatically...');
-
-                // REINTENTO AUTOMÁTICO (una sola vez)
-                const retryResult = await mcpClient.callTool({
-                    name: 'notebook_query',
-                    arguments: {
-                        notebook_id: notebookId,
-                        query: req.body.query, // Usamos la query original sin contexto para el reintento simple
-                        conversation_id: conversationId || undefined
-                    }
-                });
-
-                // Si tiene éxito, devolver respuesta normal
-                const rawTextRetry = retryResult.content[0].text;
-                let responseTextRetry = rawTextRetry;
-                try {
-                    const parsed = JSON.parse(rawTextRetry);
-                    if (parsed.answer) responseTextRetry = parsed.answer;
-                } catch (e) { }
-
-                logAnalyticsEvent('RemoteQueryRetry', { success: true });
-
-                return res.json({
-                    response: responseTextRetry,
-                    outOfScope: false,
-                    conversationId: retryResult.conversationId
-                });
-
-            } catch (refreshError) {
-                console.error('Failed to auto-retry query after refresh:', refreshError);
-                return res.status(401).json({
-                    error: 'La sesión se ha renovado. Por favor intenta tu pregunta de nuevo.'
-                });
-            }
-        }
-
-        res.status(500).json({
-            error: `Error al procesar la consulta: ${errorMessage}`
-        });
-    }
-});
-
-/**
- * Audio Transcription Endpoint
- * High-speed transcription using OpenAI Whisper API
- */
-app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
-    try {
-        if (!req.file) {
-            return res.status(400).json({ error: 'No audio file provided' });
-        }
-
-        if (!process.env.OPENAI_API_KEY) {
-            console.warn('⚠️ Whisper fallback: No OpenAI API key configured.');
-            return res.status(500).json({
-                error: 'Servicio de transcripción no configurado en el servidor.',
-                fallbackToWebSpeech: true
+            return res.status(401).json({
+                error: `Error de autenticación: ${errorMessage}. Por favor, ejecuta "npx notebooklm-mcp-server auth" para renovar sesión.`
             });
         }
 
-        console.log(`🎙️ Recibido audio para transcripción (${req.file.size} bytes)`);
-        const start = Date.now();
-
-        const openai = new OpenAI({
-            apiKey: process.env.OPENAI_API_KEY,
-        });
-
-        // Crear un archivo temporal legible para la API de OpenAI
-        const tempPath = path.join(os.tmpdir(), `upload_${Date.now()}.webm`);
-        fs.writeFileSync(tempPath, req.file.buffer);
-
-        const transcription = await openai.audio.transcriptions.create({
-            file: fs.createReadStream(tempPath),
-            model: "whisper-1",
-            language: "es",
-        });
-
-        // Limpiar archivo temporal
-        fs.unlinkSync(tempPath);
-
-        const duration = Date.now() - start;
-        console.log(`✅ Transcripción Whisper completada en ${duration}ms: "${transcription.text}"`);
-
-        logAnalyticsEvent('WhisperTranscription', {
-            fileSize: req.file.size,
-            latencyMs: duration,
-            textLength: transcription.text.length
-        });
-
-        res.json({
-            transcript: transcription.text,
-            latencyMs: duration
-        });
-
-    } catch (error) {
-        console.error('Whisper Error:', error);
+        // Return valid JSON error even for 500
         res.status(500).json({
-            error: 'Error al procesar el audio',
-            details: error.message,
-            fallbackToWebSpeech: true
+            error: `Error al procesar la consulta: ${errorMessage}`
         });
     }
 });
@@ -587,16 +620,29 @@ app.use((err, req, res, next) => {
 /**
  * SPA Fallback for /AsistenteRRHH/ routing (must be after API routes)
  */
-app.use((req, res, next) => {
+app.get(/\/AsistenteRRHH($|\/.*)/, (req, res, next) => {
     // If it's a request to the main app path, serve index.html (SPA)
-    if (req.path.startsWith('/AsistenteRRHH/') && !req.path.includes('.')) {
-        return res.sendFile(path.join(process.cwd(), 'dist', 'index.html'));
-    }
-    // API 404
-    if (req.path.startsWith('/api')) {
-        return res.status(404).json({ error: 'Endpoint no encontrado' });
+    if (!req.path.includes('.')) {
+        return res.sendFile(path.join(APP_ROOT, 'dist', 'index.html'));
     }
     next();
+});
+
+// API 404
+app.use('/api', (req, res) => {
+    res.status(404).json({ error: 'Endpoint no encontrado' });
+});
+
+// Global 500 error handler — MUST have 4 args for Express to recognize it as error middleware
+// Without this, unhandled async errors produce an empty 500 with no body (the reported bug).
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+    console.error('[Express Error]', req.method, req.url, err.message || err);
+    if (res.headersSent) return next(err);
+    res.status(500).json({
+        error: 'Error interno del servidor.',
+        detail: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
 });
 
 /**
@@ -634,10 +680,10 @@ async function startServer() {
             console.log(`\n📚 Connected to NotebookLM notebook: ${notebookId}`);
             console.log(`\nEndpoints:`);
             console.log(`  GET  /api/health        - Health check`);
-            console.log(`  GET  /api/system-status - System Health Monitor (NUEVO)`);
+            console.log(`  GET  /api/system-status - System Health Monitor`);
             console.log(`  POST /api/query         - Query RRHH knowledge base`);
-            console.log(`  POST /api/analytics     - Analytics Report`);
-            console.log(`  POST /api/tts           - Google Cloud Text-to-Speech`);
+            console.log(`  POST /api/analytics     - Analytics logging`);
+            console.log(`  GET  /api/analytics     - Get last 100 analytics events`);
             console.log(`  POST /api/reset         - Reset conversation`);
             console.log(`  GET  /api/notebook      - Get notebook info\n`);
             console.log(`🚀 SERVIDOR LISTO Y ESCUCHANDO. NO CIERRES ESTA VENTANA.`);

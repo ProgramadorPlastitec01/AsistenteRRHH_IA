@@ -7,7 +7,9 @@ const AnalyticsDashboard = ({ onClose }) => {
     const [events, setEvents] = useState([]);
     const [loading, setLoading] = useState(true);
     const [stats, setStats] = useState({ total: 0, remote: 0, local: 0, savedTime: 0 });
-    const [activeTab, setActiveTab] = useState('analytics'); // 'analytics' | 'system'
+    const [systemErrors, setSystemErrors] = useState([]);
+    const [activeTab, setActiveTab] = useState('analytics'); // 'analytics' | 'system' | 'errors'
+    const [errorFilter, setErrorFilter] = useState('all'); // 'all' | 'Mic'
 
     const fetchAnalytics = async () => {
         setLoading(true);
@@ -21,6 +23,29 @@ const AnalyticsDashboard = ({ onClose }) => {
             console.error('Error fetching stats:', err);
         } finally {
             setLoading(false);
+        }
+    };
+
+    const fetchSystemErrors = async () => {
+        try {
+            const res = await fetch(`${API_BASE_URL}/api/system-errors`);
+            const data = await res.json();
+            if (data.errors) setSystemErrors(data.errors);
+        } catch (err) {
+            console.error('Error fetching system errors:', err);
+        }
+    };
+
+    const resolveError = async (id) => {
+        try {
+            const res = await fetch(`${API_BASE_URL}/api/system-errors/resolve`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id })
+            });
+            if (res.ok) fetchSystemErrors();
+        } catch (err) {
+            console.error('Error resolving error:', err);
         }
     };
 
@@ -52,7 +77,11 @@ const AnalyticsDashboard = ({ onClose }) => {
 
     useEffect(() => {
         fetchAnalytics();
-        const interval = setInterval(fetchAnalytics, 10000); // Auto-refresh cada 10s
+        fetchSystemErrors();
+        const interval = setInterval(() => {
+            fetchAnalytics();
+            fetchSystemErrors();
+        }, 10000); // Auto-refresh cada 10s
         return () => clearInterval(interval);
     }, []);
 
@@ -61,6 +90,25 @@ const AnalyticsDashboard = ({ onClose }) => {
         if (type === 'LocalIntentResolved') return 'bg-green-500/20 text-green-300 border-green-500/50';
         if (type === 'LocalCacheHit') return 'bg-blue-500/20 text-blue-300 border-blue-500/50';
         return 'bg-gray-500/20 text-gray-300';
+    };
+
+    const getDeviceInfo = (ua) => {
+        if (!ua) return 'Unknown Device';
+        if (ua.includes('iPhone')) return '📱 iPhone';
+        if (ua.includes('iPad')) return 'tablet iPad';
+        if (ua.includes('Android')) return ua.includes('wv') ? '📱 Android (WV)' : '📱 Android';
+        if (ua.includes('Windows')) return '💻 Windows';
+        if (ua.includes('Macintosh')) return '💻 Mac';
+        return '🖥️ Desktop/Other';
+    };
+
+    const getBrowserInfo = (ua) => {
+        if (!ua) return '---';
+        if (ua.includes('Edg/')) return 'Edge';
+        if (ua.includes('Chrome/')) return 'Chrome';
+        if (ua.includes('Safari/') && !ua.includes('Chrome/')) return 'Safari';
+        if (ua.includes('Firefox/')) return 'Firefox';
+        return 'Other';
     };
 
     return (
@@ -99,12 +147,110 @@ const AnalyticsDashboard = ({ onClose }) => {
                 >
                     🖥️ Estado de Servicios
                 </button>
+                <button
+                    onClick={() => setActiveTab('errors')}
+                    className={`px-6 py-3 rounded-full text-sm font-bold transition-all flex items-center gap-2 ${activeTab === 'errors' ? 'bg-red-600 text-white shadow-[0_0_20px_rgba(220,38,38,0.4)]' : 'bg-white/5 text-white/40 hover:bg-white/10'}`}
+                >
+                    🚨 Errores del Sistema
+                    {systemErrors.filter(e => e.status === 'pending').length > 0 && (
+                        <span className="bg-white text-red-600 rounded-full w-5 h-5 flex items-center justify-center text-[10px] animate-pulse">
+                            {systemErrors.filter(e => e.status === 'pending').length}
+                        </span>
+                    )}
+                </button>
             </div>
 
             {/* Content Area */}
             <div className="flex-grow overflow-hidden flex flex-col">
                 {activeTab === 'system' ? (
                     <SystemStatus />
+                ) : activeTab === 'errors' ? (
+                    <div className="flex-grow flex flex-col overflow-hidden">
+                        <div className="bg-black/20 rounded-xl border border-white/5 overflow-hidden flex flex-col flex-grow">
+                            <div className="px-6 py-4 border-b border-white/5 bg-white/5 flex justify-between items-center">
+                                <h3 className="text-sm font-semibold text-white/80">System Error Log</h3>
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={() => setErrorFilter('all')}
+                                        className={`px-3 py-1 rounded text-[10px] border transition-all ${errorFilter === 'all' ? 'bg-white/10 border-white/20 text-white' : 'border-transparent text-white/40'}`}
+                                    >
+                                        Todos
+                                    </button>
+                                    <button
+                                        onClick={() => setErrorFilter('Mic')}
+                                        className={`px-3 py-1 rounded text-[10px] border transition-all ${errorFilter === 'Mic' ? 'bg-orange-500/20 border-orange-500/40 text-orange-400' : 'border-transparent text-white/40'}`}
+                                    >
+                                        🎙️ Mic Errs
+                                    </button>
+                                </div>
+                            </div>
+                            <div className="overflow-auto p-4 space-y-3 custom-scrollbar">
+                                {systemErrors.length === 0 ? (
+                                    <div className="text-center py-20 text-white/10 italic">No se han registrado errores aún.</div>
+                                ) : (
+                                    systemErrors
+                                        .filter(err => errorFilter === 'all' || err.type === errorFilter)
+                                        .map((err) => (
+                                            <motion.div
+                                                key={err.id}
+                                                initial={{ opacity: 0, y: 10 }}
+                                                animate={{ opacity: 1, y: 0 }}
+                                                className={`p-4 rounded-xl border ${err.status === 'resolved' ? 'bg-green-500/5 border-green-500/10 opacity-60' : 'bg-red-500/5 border-red-500/20'} flex flex-col md:flex-row gap-4`}
+                                            >
+                                                <div className="flex-shrink-0 w-32">
+                                                    <div className="text-[10px] text-white/30 mb-1">{new Date(err.timestamp).toLocaleString()}</div>
+                                                    <span className={`px-2 py-0.5 rounded text-[8px] font-bold uppercase ${err.type === 'Mic' ? 'bg-orange-500/20 text-orange-400' : 'bg-red-500/20 text-red-400'}`}>
+                                                        {err.type}
+                                                    </span>
+                                                </div>
+                                                <div className="flex-grow">
+                                                    <div className="text-xs font-bold text-white/80 mb-1">[{err.module}] {err.message}</div>
+
+                                                    <div className="flex flex-wrap gap-2 mb-2">
+                                                        <div className="px-1.5 py-0.5 bg-white/5 rounded text-[9px] text-white/40 border border-white/10">
+                                                            {getDeviceInfo(err.details?.userAgent)}
+                                                        </div>
+                                                        <div className="px-1.5 py-0.5 bg-white/5 rounded text-[9px] text-white/40 border border-white/10">
+                                                            🌐 {getBrowserInfo(err.details?.userAgent)}
+                                                        </div>
+                                                        {err.details?.phase && (
+                                                            <div className="px-1.5 py-0.5 bg-blue-500/10 rounded text-[9px] text-blue-400/80 border border-blue-500/20">
+                                                                Phase: {err.details.phase}
+                                                            </div>
+                                                        )}
+                                                        {err.details?.isSecure === false && (
+                                                            <div className="px-1.5 py-0.5 bg-red-500/10 rounded text-[9px] text-red-400 font-bold border border-red-500/20">
+                                                                ⚠️ INSECURE CONTEXT
+                                                            </div>
+                                                        )}
+                                                    </div>
+
+                                                    {err.stack && (
+                                                        <pre className="text-[9px] text-white/20 bg-black/40 p-2 rounded overflow-x-auto font-mono whitespace-pre-wrap">
+                                                            {err.stack}
+                                                        </pre>
+                                                    )}
+                                                </div>
+                                                <div className="flex-shrink-0 flex items-center justify-end">
+                                                    {err.status === 'pending' ? (
+                                                        <button
+                                                            onClick={() => resolveError(err.id)}
+                                                            className="px-4 py-2 bg-green-600/20 hover:bg-green-600/40 border border-green-500/30 rounded-lg text-green-400 text-[10px] font-bold transition-all"
+                                                        >
+                                                            Marcar Resuelto
+                                                        </button>
+                                                    ) : (
+                                                        <span className="text-green-400/40 text-[10px] flex items-center gap-1 italic">
+                                                            ✅ Resuelto
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </motion.div>
+                                        ))
+                                )}
+                            </div>
+                        </div>
+                    </div>
                 ) : (
                     <>
                         {/* KPI Cards */}

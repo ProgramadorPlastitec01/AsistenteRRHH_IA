@@ -33,6 +33,11 @@ const NexusCore = ({ status, volume }) => {
             secondary: '#1d4ed8',
             glow: 'rgba(59, 130, 246, 0.3)',
         },
+        init: {
+            primary: '#3b82f6',
+            secondary: '#1d4ed8',
+            glow: 'rgba(59, 130, 246, 0.3)',
+        },
         listening: {
             primary: '#10b981', // Green
             secondary: '#059669',
@@ -43,10 +48,25 @@ const NexusCore = ({ status, volume }) => {
             secondary: '#6d28d9',
             glow: 'rgba(139, 92, 246, 0.4)',
         },
+        processing: { // Alias for thinking
+            primary: '#8b5cf6',
+            secondary: '#6d28d9',
+            glow: 'rgba(139, 92, 246, 0.4)',
+        },
         speaking: {
             primary: '#f59e0b', // Orange
             secondary: '#d97706',
             glow: 'rgba(245, 158, 11, 0.4)',
+        },
+        responding: { // Alias for speaking
+            primary: '#f59e0b',
+            secondary: '#d97706',
+            glow: 'rgba(245, 158, 11, 0.4)',
+        },
+        error: {
+            primary: '#ef4444', // Red
+            secondary: '#b91c1c',
+            glow: 'rgba(239, 68, 68, 0.4)',
         }
     };
 
@@ -162,7 +182,7 @@ const NexusCore = ({ status, volume }) => {
 
                 {/* Rayos de Comunicación Suavizados */}
                 <AnimatePresence>
-                    {status === 'speaking' && (
+                    {(status === 'speaking' || status === 'responding') && (
                         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                             {[...Array(12)].map((_, i) => (
                                 <motion.div

@@ -41,21 +41,30 @@ rl.question('Pega aquí el contenido de la cookie y pulsa Enter:\n> ', (cookieSt
         cleanCookies = cleanCookies.replace(/^cookie:\s*/i, '');
     }
 
+    // Validación básica: Debe contener al menos SID o __Secure-1PSID
+    if (!cleanCookies.includes('SID=') && !cleanCookies.includes('__Secure-1PSID=')) {
+        console.warn('⚠️ Advertencia: La cookie no parece válida (faltan campos SID o __Secure-1PSID).');
+        console.warn('   Asegúrate de copiar TODO el contenido del campo "cookie".');
+    }
+
     const authData = {
         cookies: cleanCookies,
         updatedAt: new Date().toISOString()
     };
 
     try {
-        // 1. Guardar en el directorio del usuario actual (para pruebas locales)
+        // [MODIFICADO] 1. Guardar en el directorio ACTUAL (Proyecto) - PRIORIDAD 1
+        const localAuthFile = path.join(process.cwd(), 'auth.json');
+        fs.writeFileSync(localAuthFile, JSON.stringify(authData, null, 2));
+        console.log('\n✅ Credenciales guardadas en RAIZ DEL PROYECTO:');
+        console.log(`   ${localAuthFile}`);
+
+        // 2. Guardar también en el directorio del usuario (Respaldo)
         if (!fs.existsSync(AUTH_DIR)) {
             fs.mkdirSync(AUTH_DIR, { recursive: true });
         }
-
         fs.writeFileSync(AUTH_FILE, JSON.stringify(authData, null, 2));
-
-        console.log('\n✅ Credenciales guardadas para TU USUARIO en:');
-        console.log(`   ${AUTH_FILE}`);
+        console.log('   (Backup guardado en perfil de usuario)');
 
         // 2. Intentar guardar en el perfil de SISTEMA (para el Servicio de Windows)
         // La ruta suele ser C:\Windows\System32\config\systemprofile\.notebooklm-mcp
@@ -72,6 +81,13 @@ rl.question('Pega aquí el contenido de la cookie y pulsa Enter:\n> ', (cookieSt
                 }
                 const systemAuthFile = path.join(systemProfilePath, 'auth.json');
                 fs.writeFileSync(systemAuthFile, JSON.stringify(authData, null, 2));
+                
+                // Intentar dar permisos de lectura a todos en el archivo del sistema (para evitar bloqueos del servicio)
+                try {
+                    const { execSync } = require('child_process');
+                    execSync(`icacls "${systemAuthFile}" /grant Everyone:R`, { stdio: 'ignore' });
+                } catch (e) { /* ignore permission error if icacls fails */ }
+
                 console.log('✅ Credenciales copiadas al SISTEMA (para el Servicio Backend).');
             } catch (sysErr) {
                 console.warn('\n⚠️ No se pudo copiar al perfil de SISTEMA (falta de permisos).');
@@ -81,18 +97,7 @@ rl.question('Pega aquí el contenido de la cookie y pulsa Enter:\n> ', (cookieSt
         }
 
         console.log('\n✅ PROCESO COMPLETADO.');
-        console.log('Reiniciando servicio backend para aplicar cambios...');
-
-        // Intentar reiniciar el servicio automáticamente
-        const { exec } = require('child_process');
-        exec('net stop "asistenterrhhiabackend.exe" && net start "asistenterrhhiabackend.exe"', (err, stdout) => {
-            if (err) {
-                console.log('   (No se pudo reiniciar el servicio automáticamente. Hazlo manualmente si es necesario).');
-            } else {
-                console.log('   Servicio reiniciado exitosamente.');
-            }
-            process.exit(0);
-        });
+        process.exit(0);
 
     } catch (error) {
         console.error('❌ Error al escribir el archivo:', error.message);

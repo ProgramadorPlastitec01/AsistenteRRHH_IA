@@ -9,19 +9,17 @@ import TypewriterText from './TypewriterText';
 import AnalyticsDashboard from './AnalyticsDashboard';
 
 const VoiceChat = () => {
-    const [isActivated, setIsActivated] = useState(false);
+    const [appState, setAppState] = useState('INIT'); // INIT, IDLE, LISTENING, PROCESSING, RESPONDING, ERROR
     const [isModalOpen, setIsModalOpen] = useState(false);
-    const [state, setState] = useState('idle'); // idle, listening, thinking, speaking
     const [transcript, setTranscript] = useState('');
     const [response, setResponse] = useState('');
     const [error, setError] = useState(null);
     const [timeLeft, setTimeLeft] = useState(25);
+    const [processingStep, setProcessingStep] = useState(0); // 1: Recibiendo, 2: Analizando, 3: Generando
 
     // Analytics & Debug
     const [showAnalytics, setShowAnalytics] = useState(false);
     const [performanceMetrics, setPerformanceMetrics] = useState(null);
-    const [debugLogs, setDebugLogs] = useState([]);
-    const [showDebug, setShowDebug] = useState(false);
     const secretClickRef = useRef(0);
 
     const handleSecretClick = (e) => {
@@ -41,23 +39,15 @@ const VoiceChat = () => {
 
         // Clear counter if not finished in 2 seconds
         if (secretClickRef.current === 1) {
-            setTimeout(() => {
-                secretClickRef.current = 0;
-            }, 2500);
+            setTimeout(() => { secretClickRef.current = 0; }, 2500);
         }
-    };
-
-    const addLog = (message, type = 'info') => {
-        const timestamp = new Date().toLocaleTimeString();
-        const icon = type === 'error' ? '❌' : type === 'success' ? '✅' : 'ℹ️';
-        const newLog = `${icon} [${timestamp}] ${message}`;
-        setDebugLogs(prev => [newLog, ...prev].slice(0, 100));
     };
 
     const [isSupported, setIsSupported] = useState(true);
     const volume = useMotionValue(0);
     const visualizerScale = useTransform(volume, [0, 100], [1, 1.8]);
     const visualizerOpacity = useTransform(volume, [0, 20], [0, 0.4]);
+
 
     const recognitionRef = useRef(null);
     const synthRef = useRef(window.speechSynthesis);
@@ -78,6 +68,18 @@ const VoiceChat = () => {
     const analyserRef = useRef(null);
     const currentUtteranceRef = useRef(null);
 
+    // stateRef: mirrors `appState` but is always up-to-date inside async callbacks
+    const stateRef = useRef(appState);
+    useEffect(() => { stateRef.current = appState; }, [appState]);
+
+    // mountedRef: prevents setState calls after the component has been unmounted.
+    const mountedRef = useRef(true);
+    const isLocked = useRef(false); // Mutex lock to prevent duplicate queries or starts
+    useEffect(() => {
+        mountedRef.current = true;
+        return () => { mountedRef.current = false; };
+    }, []);
+
     // Device detection
     const isMobileDevice = useRef((() => {
         const ua = navigator.userAgent;
@@ -87,27 +89,19 @@ const VoiceChat = () => {
     useEffect(() => {
         if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
             setIsSupported(false);
-            addLog('Navegador no soporta Web Speech API', 'error');
+            console.error('[VoiceChat] Navegador no soporta Web Speech API');
             return;
         }
         notebookLMClient.initialize();
         notebookLMClient.resetConversation(); // Clear cache on startup to avoid 'Sy' bug
     }, []);
 
-    // 🕰️ GLOBAL INACTIVITY & RESPONSE TIMER
-    useEffect(() => {
-        // Reset to Welcome Screen after 120s of total inactivity
-        const sessionTimeout = 120000;
-        let sessionInterval = setInterval(() => {
-            if (isActivated && state === 'idle' && !response) {
-                // We check inactivity differently here if needed, 
-                // but let's focus on the response timer which is the bug
-            }
-        }, 5000);
 
-        // Movement listeners
+    // 🕰️ INACTIVITY & RESPONSE TIMER
+    useEffect(() => {
+        // Movement listeners: reset auto-close timer when user interacts
         const handleInteraction = () => {
-            if (response && state === 'idle') {
+            if (response && stateRef.current === 'IDLE') {
                 setTimeLeft(25); // Reset timer on user interaction
             }
         };
@@ -117,17 +111,17 @@ const VoiceChat = () => {
         window.addEventListener('keydown', handleInteraction);
 
         return () => {
-            clearInterval(sessionInterval);
             window.removeEventListener('mousemove', handleInteraction);
             window.removeEventListener('touchstart', handleInteraction);
             window.removeEventListener('keydown', handleInteraction);
         };
-    }, [isActivated, response, state]);
+    }, [response]);
+
 
     // Dedicated Response Auto-Close Timer
     useEffect(() => {
         let interval = null;
-        if (response && state === 'idle') {
+        if (response && appState === 'IDLE') {
             interval = setInterval(() => {
                 setTimeLeft(prev => {
                     if (prev <= 1) {
@@ -140,8 +134,22 @@ const VoiceChat = () => {
         } else {
             setTimeLeft(25); // Reset while speaking/thinking
         }
-        return () => { if (interval) clearInterval(interval); };
-    }, [response, state]);
+        return () => {
+            if (interval) clearInterval(interval);
+        };
+    }, [response, appState]);
+
+    // Cleanup tracks on unmount
+    useEffect(() => {
+        return () => {
+            if (streamRef.current) {
+                streamRef.current.getTracks().forEach(track => track.stop());
+            }
+            if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+                audioContextRef.current.close();
+            }
+        };
+    }, []);
 
     const speakText = async (text) => {
         if (!synthRef.current) return;
@@ -165,15 +173,15 @@ const VoiceChat = () => {
 
         utterance.onstart = () => {
             ttsInProgressRef.current = true;
-            setState('speaking');
+            setAppState('RESPONDING');
         };
         utterance.onend = () => {
             ttsInProgressRef.current = false;
-            setState(prev => prev === 'speaking' ? 'idle' : prev);
+            setAppState(prev => prev === 'RESPONDING' ? 'IDLE' : prev);
         };
         utterance.onerror = () => {
             ttsInProgressRef.current = false;
-            setState(prev => prev === 'speaking' ? 'idle' : prev);
+            setAppState(prev => prev === 'RESPONDING' ? 'IDLE' : prev);
         };
 
         // Intentar seleccionar la mejor voz en español si está disponible
@@ -191,16 +199,35 @@ const VoiceChat = () => {
     const handleQuery = async (queryText) => {
         if (!queryText || queryText.trim().length < 2) return;
 
+        // GHOSTING PROTECTION: Prevent multiple simultaneous queries
+        if (isLocked.current) {
+            console.warn(`[VoiceChat] Ignored concurrent query - Lock active: "${queryText}"`);
+            return;
+        }
+        isLocked.current = true;
+
         const qStart = performance.now();
-        setState('thinking');
+        console.log(`[Timing] 0ms — handleQuery started: "${queryText}"`);
+
+        // FORCE PROCESSING STATE IMMEDIATELY (Critical to prevent onend race condition)
+        setAppState('PROCESSING');
+        setProcessingStep(1); // Paso 1: Recibiendo solicitud
         setError(null);
         setTranscript(queryText);
 
+        // Timers para cambios de estado dinámicos (basados en tiempos promedio observados)
+        const step2Timer = setTimeout(() => setProcessingStep(2), 800);  // Analizando
+        const step3Timer = setTimeout(() => setProcessingStep(3), 3500); // Generando
+
         try {
             abortControllerRef.current = new AbortController();
+            console.log(`[Timing] ${(performance.now() - qStart).toFixed(0)}ms — sending to backend`);
             const result = await notebookLMClient.query(queryText, {
                 signal: abortControllerRef.current.signal
             });
+            console.log(`[Timing] ${(performance.now() - qStart).toFixed(0)}ms — backend responded`);
+
+            if (!mountedRef.current) return;
 
             let finalResult = result.trim();
 
@@ -227,95 +254,80 @@ const VoiceChat = () => {
             });
 
             setResponse(finalResult);
-            setState('speaking');
+            // State will be set to RESPONDING by speakText -> utterance.onstart
             speakText(finalResult);
-            addLog(`Respuesta recibida en ${qLatency}ms`, 'success');
+            console.log(`[VoiceChat] ✅ Respuesta recibida en ${qLatency}ms`);
 
         } catch (err) {
             if (err.name === 'AbortError') return;
-            setError(err.message || 'Error al conectar con NotebookLM');
-            setState('idle');
+
+            // Report to backend
+            reportError('IA', 'handleQuery', err.message, err.stack, { query: queryText });
+
+            setError(err.message || 'Error al procesar solicitud');
+            setAppState('IDLE');
+        } finally {
+            clearTimeout(step2Timer);
+            clearTimeout(step3Timer);
+            setProcessingStep(0);
+            isLocked.current = false; // 🔓 UNLOCK AFTER ALL IS DONE
         }
     };
 
-    const stopRecording = () => {
+    const stopAnims = () => {
         if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current);
         if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-            mediaRecorderRef.current.stop();
-        }
-    };
-
-    const transcribeAudio = async (audioBlob) => {
-        const transStart = performance.now();
-        setState('thinking');
-        try {
-            const formData = new FormData();
-            formData.append('audio', audioBlob, 'recording.webm');
-
-            const response = await fetch(`${API_BASE_URL}/api/transcribe`, {
-                method: 'POST',
-                body: formData
-            });
-
-            const transLatency = (performance.now() - transStart).toFixed(0);
-            metricsRef.current.transMs = transLatency;
-
-            if (!response.ok) {
-                const data = await response.json();
-                if (data.fallbackToWebSpeech) {
-                    forceWebSpeechMode.current = true;
-                    setError('Ajustando voz para este dispositivo...');
-                    setState('idle');
-                    setTimeout(() => startListening(), 500);
-                    return;
-                }
-                throw new Error(data.error || 'Error de transcripción');
-            }
-
-            const data = await response.json();
-            await handleQuery(data.transcript);
-
-        } catch (err) {
-            setError(`Error: ${err.message}`);
-            setState('idle');
-        }
+        volume.set(0);
     };
 
     const startRecording = async () => {
-        const triggerTime = performance.now();
-        metricsRef.current = { trigger: triggerTime };
+        // Esta función ahora solo se encarga de cambiar el estado visual y preparar la escucha nativa
+        startListening();
+    };
 
-        try {
-            if (synthRef.current) synthRef.current.cancel();
-            setError(null);
-            setResponse('');
-            setState('listening');
+    const startListening = (isRetry = false) => {
+        if (!isSupported) return;
 
-            const stream = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    channelCount: 1,
-                    sampleRate: 16000
-                }
-            });
-            streamRef.current = stream;
+        // 🔒 LOCK CHECK
+        if (isLocked.current && !isRetry) {
+            console.warn('[VoiceChat] startListening blocked by lock');
+            return;
+        }
 
-            metricsRef.current.micMs = (performance.now() - triggerTime).toFixed(0);
+        if (stateRef.current !== 'IDLE' && !isRetry) {
+            console.warn('[VoiceChat] startListening blocked: state not idle');
+            return;
+        }
 
-            // Audio Context / Visualizer
-            audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
-            analyserRef.current = audioContextRef.current.createAnalyser();
-            const source = audioContextRef.current.createMediaStreamSource(stream);
-            source.connect(analyserRef.current);
-            analyserRef.current.fftSize = 128;
+        if (synthRef.current) synthRef.current.cancel();
+        setError(null);
+        setTranscript('');
+        setResponse('');
+        setAppState('LISTENING');
 
+        // 1. Manejo de Conflicto de Hardware (Especialmente para Safari/iOS)
+        // Forzamos la liberación del micro ANTES de empezar el reconocimiento en móviles
+        // para asegurar que el motor nativo tenga acceso exclusivo.
+        if (isMobileDevice.current && streamRef.current) {
+            console.log('[Mic] Mobile detected: Proactively releasing visualizer stream for recognition');
+            streamRef.current.getTracks().forEach(t => t.stop());
+            streamRef.current = null;
+        }
+
+        // Si es un reintento (aunque no sea móvil), detenemos el stream por seguridad
+        if (isRetry && streamRef.current) {
+            console.log('[Mic] Retry detected: Releasing visualizer stream to avoid hardware conflict');
+            streamRef.current.getTracks().forEach(t => t.stop());
+            streamRef.current = null;
+        }
+
+        // 2. Reiniciar visualizador si el stream está vivo (feedback de volumen)
+        if (analyserRef.current && streamRef.current) {
             const bufferLength = analyserRef.current.frequencyBinCount;
             const dataArray = new Uint8Array(bufferLength);
 
             const updateVol = () => {
-                if (analyserRef.current && state === 'listening') {
+                if (analyserRef.current && stateRef.current === 'LISTENING' && streamRef.current) {
                     analyserRef.current.getByteFrequencyData(dataArray);
                     let sum = 0;
                     for (let i = 0; i < bufferLength; i++) sum += dataArray[i];
@@ -324,107 +336,152 @@ const VoiceChat = () => {
                 }
             };
             updateVol();
-
-            // VAD
-            let silenceStart = Date.now();
-            const checkSilence = () => {
-                if (analyserRef.current && state === 'listening') {
-                    analyserRef.current.getByteFrequencyData(dataArray);
-                    let sum = 0;
-                    for (let i = 0; i < bufferLength; i++) sum += dataArray[i];
-                    const avg = sum / bufferLength;
-                    if (avg < 15) {
-                        if (Date.now() - silenceStart > 1500) {
-                            stopRecording();
-                            return;
-                        }
-                    } else {
-                        silenceStart = Date.now();
-                    }
-                    requestAnimationFrame(checkSilence);
+        } else if (stateRef.current === 'LISTENING' || stateRef.current === 'RESPONDING') {
+            // FALLBACK: Animación de pulso si no hay stream (Modo Bajo Conflicto o Habla IA)
+            let phase = 0;
+            const pulseVol = () => {
+                if ((stateRef.current === 'LISTENING' || stateRef.current === 'RESPONDING') && !streamRef.current) {
+                    phase += 0.1;
+                    const val = 15 + Math.sin(phase) * 10;
+                    volume.set(val);
+                    animationFrameRef.current = requestAnimationFrame(pulseVol);
                 }
             };
-            setTimeout(checkSilence, 1200);
-
-            // MediaRecorder
-            audioChunksRef.current = [];
-            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
-
-            mediaRecorderRef.current = new MediaRecorder(stream, {
-                mimeType,
-                audioBitsPerSecond: 16000
-            });
-
-            mediaRecorderRef.current.ondataavailable = e => {
-                if (e.data.size > 0) audioChunksRef.current.push(e.data);
-            };
-
-            mediaRecorderRef.current.onstop = async () => {
-                const recDuration = (performance.now() - triggerTime - metricsRef.current.micMs).toFixed(0);
-                metricsRef.current.recMs = recDuration;
-
-                if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-                if (audioContextRef.current && audioContextRef.current.state !== 'closed') audioContextRef.current.close();
-                if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-                volume.set(0);
-
-                const blob = new Blob(audioChunksRef.current, { type: mimeType });
-                if (blob.size > 1000) {
-                    await transcribeAudio(blob);
-                } else {
-                    setState('idle');
-                }
-            };
-
-            mediaRecorderRef.current.start();
-            recordingTimeoutRef.current = setTimeout(() => stopRecording(), 10000);
-
-        } catch (err) {
-            console.error('Mic Error:', err);
-            setError('Micrófono no disponible');
-            setState('idle');
+            pulseVol();
         }
-    };
 
-    const startListening = () => {
-        if (!isSupported) return;
-        if (isMobileDevice.current && !forceWebSpeechMode.current) {
-            startRecording();
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+            setError('Tu navegador no soporta reconocimiento de voz nativo.');
+            setAppState('IDLE');
             return;
         }
 
-        if (synthRef.current) synthRef.current.cancel();
-        setError(null);
-        setTranscript('');
-        setResponse('');
-        setState('listening');
+        if (recognitionRef.current) {
+            try {
+                recognitionRef.current.onresult = null;
+                recognitionRef.current.onend = null;
+                recognitionRef.current.onerror = null;
+                recognitionRef.current.abort();
+            } catch (e) { /* ignore */ }
+        }
 
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         recognitionRef.current = new SpeechRecognition();
         recognitionRef.current.lang = 'es-MX';
+        recognitionRef.current.continuous = false;
+        recognitionRef.current.interimResults = true;
+        recognitionRef.current.maxAlternatives = 1;
+
+        console.log(`[Mic] Recognition start (isRetry: ${isRetry})`);
 
         recognitionRef.current.onresult = (e) => {
-            const text = e.results[0][0].transcript;
-            handleQuery(text);
-        };
-        recognitionRef.current.onerror = () => setState('idle');
-        recognitionRef.current.onend = () => { if (state === 'listening') setState('idle'); };
+            const last = e.results.length - 1;
+            const text = e.results[last][0].transcript;
+            const isFinal = e.results[last].isFinal;
 
-        recognitionRef.current.start();
+            if (isFinal) {
+                console.log('[Mic] Final transcription:', text);
+                // 🛑 IMMEDIATE STOP TO PREVENT DUPLICATES
+                recognitionRef.current.stop();
+                handleQuery(text);
+            } else {
+                setTranscript(text);
+            }
+        };
+
+        recognitionRef.current.onerror = async (e) => {
+            console.error('[Mic] Native Recognition Error:', e.error);
+
+            if (!mountedRef.current) return;
+
+            // 3. Lógica de Reintento Silencioso para errores comunes en Mobile
+            if ((e.error === 'audio-capture' || e.error === 'no-speech') && !isRetry) {
+                console.log(`[Mic] Attempting silent retry for error: ${e.error}`);
+                recognitionRef.current.stop();
+                // Breve pausa para que el sistema operativo libere el hardware
+                await new Promise(r => setTimeout(r, 300));
+                startListening(true);
+                return;
+            }
+
+            if (e.error !== 'no-speech') {
+                setError(`Reconocimiento: ${e.error}`);
+                reportError('Mic', 'NativeSpeech', e.error, null, {
+                    phase: 'NativeRecognition',
+                    isRetry,
+                    errorDetails: e.message || 'No details'
+                });
+            }
+            setAppState('IDLE');
+        };
+
+        recognitionRef.current.onend = () => {
+            console.log('[Mic] Recognition session ended');
+            // GUARD: Only reset to IDLE if there's no query processing or lock active
+            if (stateRef.current === 'LISTENING' && !isLocked.current && mountedRef.current) {
+                console.log('[Mic] Safe to reset to IDLE');
+                setAppState('IDLE');
+                stopAnims();
+            } else {
+                console.log('[Mic] Blocked reset to IDLE - Logic in transition or processing');
+            }
+        };
+
+        try {
+            recognitionRef.current.start();
+        } catch (e) {
+            console.error('[Mic] Critical start failure:', e);
+            if (!isRetry) startListening(true);
+            else setAppState('IDLE');
+        }
     };
 
     const stopListening = () => {
         if (recognitionRef.current) recognitionRef.current.stop();
-        if (mediaRecorderRef.current) stopRecording();
+        stopAnims();
         if (abortControllerRef.current) abortControllerRef.current.abort();
-        setState('idle');
+        setAppState('IDLE');
+    };
+
+    const reportError = async (type, module, message, stack = null, details = {}) => {
+        try {
+            const errorMetadata = {
+                userAgent: navigator.userAgent,
+                isSecure: window.isSecureContext,
+                screen: `${window.screen.width}x${window.screen.height}`,
+                language: navigator.language,
+                state: stateRef.current,
+                ...details
+            };
+
+            await fetch(`${API_BASE_URL}/api/report-error`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    type,
+                    module,
+                    message,
+                    stack,
+                    details: errorMetadata
+                })
+            });
+        } catch (e) {
+            console.warn('Could not report error to backend:', e.message);
+        }
     };
 
     const getStateConfig = () => {
-        switch (state) {
-            case 'listening': return { icon: '🎙️', text: 'Te escucho...', subtext: 'Habla ahora', color: 'text-green-400' };
-            case 'thinking': return { icon: '🧠', text: 'Procesando...', subtext: 'Buscando respuesta...', color: 'text-blue-400' };
-            case 'speaking': return { icon: '🗣️', text: 'Respondiendo', subtext: 'Escucha con atención', color: 'text-purple-400' };
+        switch (appState) {
+            case 'LISTENING': return { icon: '🎙️', text: 'Te escucho...', subtext: 'Habla ahora', color: 'text-green-400' };
+            case 'PROCESSING':
+                // Sub-estados dinámicos durante el procesamiento
+                let stepText = 'Procesando...';
+                if (processingStep === 1) stepText = 'Recibiendo solicitud...';
+                if (processingStep === 2) stepText = 'Analizando información...';
+                if (processingStep === 3) stepText = 'Generando respuesta...';
+                return { icon: '🧠', text: stepText, subtext: 'Buscando respuesta...', color: 'text-blue-400' };
+            case 'RESPONDING': return { icon: '🗣️', text: 'Respondiendo', subtext: 'Escucha con atención', color: 'text-purple-400' };
+            case 'ERROR': return { icon: '⚠️', text: 'Error', subtext: 'Algo salió mal', color: 'text-red-400' };
             default: return { icon: '✨', text: 'Bienvenido', subtext: 'Toca el micrófono para comenzar', color: 'text-white' };
         }
     };
@@ -432,18 +489,60 @@ const VoiceChat = () => {
     const config = getStateConfig();
 
     const activateApp = async () => {
-        setIsActivated(true);
-        // 🎙️ MICROPHONE WARM-UP (Fixes the mobile "Microphone not found" bug on first load)
+        console.log('🚀 Activating app via direct user interaction...');
+
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            stream.getTracks().forEach(t => t.stop()); // Close and release immediately
-            console.log('🎙️ Mic warmed up and permission granted');
+            // 1. Solicitar permisos DIRECTAMENTE en el evento de click
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }
+            });
+
+            if (!stream || stream.getAudioTracks().length === 0) {
+                throw new Error('No se detectaron pistas de audio');
+            }
+
+            const track = stream.getAudioTracks()[0];
+
+            // 2. Validar que el hardware esté realmente 'live'
+            // Esperamos un momento para estabilización en tablets
+            await new Promise(r => setTimeout(r, 100));
+
+            if (track.readyState !== 'live') {
+                throw new Error(`Estado de hardware inconsistente: ${track.readyState}`);
+            }
+
+            console.log('✅ Microfono validado y activo');
+
+            // 3. Persistir el stream y configurar el AudioContext de una vez
+            streamRef.current = stream;
+            audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+            analyserRef.current = audioContextRef.current.createAnalyser();
+            const source = audioContextRef.current.createMediaStreamSource(stream);
+            source.connect(analyserRef.current);
+            analyserRef.current.fftSize = 128;
+
+            // 4. Solo tras éxito total, cambiar de vista
+            setAppState('IDLE');
+
         } catch (e) {
-            console.warn('Mic warm-up failed, user might need to grant permission later:', e);
+            console.error('[Mic] Error crítico en activación:', e.message);
+            reportError('Mic', 'activateApp', e.message, e.stack, {
+                phase: 'CriticalActivation',
+                errorName: e.name,
+                isSecure: window.isSecureContext
+            });
+
+            // Si falla, al menos dejamos entrar para escritura manual
+            setError('No pudimos activar el micrófono. Usando modo teclado.');
+            setAppState('IDLE');
         }
     };
 
-    if (!isActivated) {
+    if (appState === 'INIT') {
         return (
             <div className="h-screen w-full flex flex-col items-center justify-center bg-[#0d1426] cursor-pointer overflow-hidden transition-all duration-500" onClick={activateApp}>
                 <div className="absolute inset-0 z-0 opacity-40">
@@ -474,7 +573,7 @@ const VoiceChat = () => {
         <div className="h-screen w-full bg-[#0d1426] overflow-hidden relative font-sans text-white">
             {/* Visualizer Background */}
             <div className={`absolute inset-0 flex items-center justify-center transition-all duration-1000 ${response ? 'opacity-10 scale-150' : 'opacity-30 scale-100'}`}>
-                <NexusCore status={state} volume={volume} />
+                <NexusCore status={appState.toLowerCase()} volume={volume} />
             </div>
 
             <div className="relative z-10 h-full flex flex-col p-6 md:p-12">
@@ -505,7 +604,7 @@ const VoiceChat = () => {
                     {!response ? (
                         <div className="text-center space-y-8 animate-in fade-in zoom-in duration-700">
                             <motion.div
-                                animate={state === 'listening' ? { scale: [1, 1.2, 1], opacity: [0.8, 1, 0.8] } : {}}
+                                animate={appState === 'LISTENING' ? { scale: [1, 1.2, 1], opacity: [0.8, 1, 0.8] } : {}}
                                 transition={{ repeat: Infinity, duration: 1.5 }}
                                 className="text-8xl mb-6 drop-shadow-[0_0_20px_rgba(255,255,255,0.3)]"
                             >
@@ -515,40 +614,56 @@ const VoiceChat = () => {
                             <p className="text-white/40 text-2xl tracking-[0.2em] font-light">{config.subtext}</p>
                         </div>
                     ) : (
-                        <motion.div
-                            initial={{ opacity: 0, scale: 0.9, y: 50 }}
-                            animate={{ opacity: 1, scale: 1, y: 0 }}
-                            className="w-full max-w-5xl bg-[#1a2333]/90 backdrop-blur-3xl border border-white/10 rounded-[3.5rem] p-12 shadow-3xl relative overflow-hidden flex flex-col max-h-[75vh]"
-                        >
-                            {/* Progress Bar */}
-                            <div className="absolute top-0 left-0 w-full h-1.5 bg-white/5">
-                                <motion.div className="h-full bg-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.8)]" animate={{ width: `${(timeLeft / 25) * 100}%` }} transition={{ ease: "linear", duration: 1 }} />
-                            </div>
-
-                            <div className="overflow-y-auto custom-scrollbar flex-grow pr-6">
-                                <h3 className="text-blue-400 text-sm font-bold uppercase tracking-[0.3em] mb-8 sticky top-0 bg-[#1a2333]/80 backdrop-blur-md py-4 z-20 border-b border-white/5">Respuesta del Asistente</h3>
-                                <div className="text-2xl md:text-4xl font-light leading-relaxed text-slate-100 whitespace-pre-wrap pb-12">
-                                    <TypewriterText text={response} speed={18} />
+                        <>
+                            <motion.div
+                                initial={{ opacity: 0, scale: 0.9, y: 50 }}
+                                animate={{ opacity: 1, scale: 1, y: 0 }}
+                                className="w-full max-w-5xl bg-[#1a2333]/90 backdrop-blur-3xl border border-white/10 rounded-[3.5rem] p-12 shadow-3xl relative overflow-hidden flex flex-col max-h-[75vh]"
+                            >
+                                {/* Progress Bar */}
+                                <div className="absolute top-0 left-0 w-full h-1.5 bg-white/5">
+                                    <motion.div className="h-full bg-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.8)]" animate={{ width: `${(timeLeft / 25) * 100}%` }} transition={{ ease: "linear", duration: 1 }} />
                                 </div>
-                            </div>
 
-                            <div className="mt-8 pt-8 border-t border-white/10 flex justify-between items-center bg-transparent">
-                                <div className="text-white/30 text-xs italic truncate flex-grow mr-8 bg-black/20 px-4 py-2 rounded-lg border border-white/5 capitalize">
-                                    "{transcript}"
+                                <div className="overflow-y-auto custom-scrollbar flex-grow pr-6">
+                                    <h3 className="text-blue-400 text-sm font-bold uppercase tracking-[0.3em] mb-8 sticky top-0 bg-[#1a2333]/80 backdrop-blur-md py-4 z-20 border-b border-white/5">Respuesta del Asistente</h3>
+                                    <div className="text-2xl md:text-4xl font-light leading-relaxed text-slate-100 whitespace-pre-wrap pb-12">
+                                        <TypewriterText text={response} speed={18} />
+                                    </div>
                                 </div>
-                                <button
-                                    onClick={() => {
-                                        if (synthRef.current) synthRef.current.cancel();
-                                        setResponse('');
-                                        setState('idle');
-                                    }}
-                                    className="px-10 py-4 bg-white/10 hover:bg-white/20 active:scale-95 rounded-full text-white font-bold transition-all border border-white/10 flex items-center gap-3 shadow-xl group"
-                                >
-                                    <span>Entendido</span>
-                                    <span className="bg-blue-600/40 px-3 py-1 rounded-full text-xs font-mono group-hover:bg-blue-600/60 transition-colors">{timeLeft}s</span>
-                                </button>
+
+                                <div className="mt-8 pt-8 border-t border-white/10 flex flex-col md:flex-row justify-between items-center gap-6 bg-transparent">
+                                    <div className="text-white/30 text-xs italic truncate w-full md:max-w-[50%] bg-black/20 px-4 py-2 rounded-lg border border-white/5 capitalize">
+                                        "{transcript}"
+                                    </div>
+                                    <button
+                                        onClick={() => {
+                                            if (synthRef.current) synthRef.current.cancel();
+                                            setResponse('');
+                                            setAppState('IDLE');
+                                        }}
+                                        className="px-10 py-4 bg-white/10 hover:bg-white/20 active:scale-95 rounded-full text-white font-bold transition-all border border-white/10 flex items-center gap-3 shadow-xl group whitespace-nowrap"
+                                    >
+                                        <span>Entendido</span>
+                                        <span className="bg-blue-600/40 px-3 py-1 rounded-full text-xs font-mono group-hover:bg-blue-600/60 transition-colors">{timeLeft}s</span>
+                                    </button>
+                                </div>
+
+
+
+
+                            </motion.div>
+
+                            {/* IA Disclaimer Section - Moved OUTSIDE the main response box */}
+                            <div className="mt-6 p-4 bg-blue-500/5 backdrop-blur-md border border-white/5 rounded-2xl flex items-center gap-4 w-full max-w-2xl animate-in fade-in slide-in-from-bottom duration-700">
+                                <div className="w-8 h-8 flex-shrink-0 bg-blue-500/10 rounded-full flex items-center justify-center text-blue-400 text-xs shadow-inner">
+                                    ℹ️
+                                </div>
+                                <p className="text-[11px] leading-relaxed text-blue-100/40 uppercase tracking-widest font-medium">
+                                    La respuesta generada por la IA puede contener imprecisiones. Por favor, valide la información crítica.
+                                </p>
                             </div>
-                        </motion.div>
+                        </>
                     )}
                 </div>
 
@@ -556,12 +671,12 @@ const VoiceChat = () => {
                 <div className="mt-auto w-full max-w-4xl mx-auto space-y-6">
                     <div className="bg-black/60 backdrop-blur-3xl border border-white/10 rounded-full p-4 shadow-3xl flex items-center gap-6 group hover:border-white/20 transition-all">
                         <button
-                            onClick={() => state === 'listening' ? stopListening() : startListening()}
-                            disabled={state === 'thinking'}
-                            className={`relative w-24 h-24 rounded-full flex items-center justify-center text-4xl transition-all duration-500 shadow-2xl active:scale-90 flex-shrink-0 z-30 ${state === 'listening' ? 'bg-red-500 scale-110' : 'bg-blue-600 hover:bg-blue-500 hover:shadow-blue-500/50'}`}
+                            onClick={() => appState === 'LISTENING' ? stopListening() : startListening()}
+                            disabled={appState === 'PROCESSING'}
+                            className={`relative w-24 h-24 rounded-full flex items-center justify-center text-4xl transition-all duration-500 shadow-2xl active:scale-90 flex-shrink-0 z-30 ${appState === 'LISTENING' ? 'bg-red-500 scale-110' : 'bg-blue-600 hover:bg-blue-500 hover:shadow-blue-500/50'}`}
                         >
-                            <span className="relative z-10">{state === 'listening' ? '⏹' : '🎙️'}</span>
-                            {state === 'listening' && (
+                            <span className="relative z-10">{appState === 'LISTENING' ? '⏹' : '🎙️'}</span>
+                            {appState === 'LISTENING' && (
                                 <>
                                     <motion.div className="absolute inset-0 bg-red-400 rounded-full animate-ping opacity-20" />
                                     <motion.div
@@ -577,7 +692,7 @@ const VoiceChat = () => {
                                 id="manualInput"
                                 type="text"
                                 placeholder="Escribe tu consulta aquí..."
-                                disabled={state === 'listening'}
+                                disabled={appState === 'LISTENING' || appState === 'PROCESSING'}
                                 className="w-full bg-transparent border-none text-white text-2xl placeholder-white/15 focus:ring-0 px-2"
                                 onKeyDown={e => {
                                     if (e.key === 'Enter' && e.target.value.trim()) {
@@ -596,9 +711,10 @@ const VoiceChat = () => {
                                     input.value = '';
                                 }
                             }}
-                            className="bg-white/5 hover:bg-white/15 active:scale-95 p-6 rounded-full transition-all mr-2 shadow-inner group-hover:bg-blue-600/20"
+                            disabled={appState === 'PROCESSING'}
+                            className={`bg-white/5 hover:bg-white/15 active:scale-95 p-6 rounded-full transition-all mr-2 shadow-inner group-hover:bg-blue-600/20 ${appState === 'PROCESSING' ? 'opacity-50 cursor-not-allowed' : ''}`}
                         >
-                            <span className="text-2xl text-white/50 group-hover:text-blue-400 transition-colors">➤</span>
+                            <span className={`text-2xl ${appState === 'PROCESSING' ? 'text-white/20' : 'text-white/50 group-hover:text-blue-400'} transition-colors`}>➤</span>
                         </button>
                     </div>
 
@@ -702,7 +818,7 @@ const VoiceChat = () => {
                     </motion.div>
                 )}
             </AnimatePresence>
-        </div>
+        </div >
     );
 };
 
