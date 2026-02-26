@@ -251,3 +251,18 @@
 {"timestamp":"2026-02-26T18:33:34.051Z","type":"RemoteQuery","query":"Quién es Luis Felipe sol","responseLength":98,"latencyMs":14626,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
 {"timestamp":"2026-02-26T18:33:41.946Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola","latencyMs":"0.60"}
 {"timestamp":"2026-02-26T18:33:50.538Z","type":"LocalIntentResolved","intentType":"identity","query":"quién eres","latencyMs":"0.50"}
+{"timestamp":"2026-02-26T18:40:56.598Z","type":"RemoteQuery","query":"Que informacion tienes","responseLength":650,"latencyMs":30871,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-02-26T18:54:45.751Z","type":"RemoteQuery","query":"Vacaciones y Días Libres","responseLength":392,"latencyMs":27192,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-02-26T18:59:32.126Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola","latencyMs":"1.50"}
+{"timestamp":"2026-02-26T20:13:46.616Z","type":"RemoteQuery","query":"Horarios y Turnos","responseLength":19,"latencyMs":1518,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-02-26T20:44:31.376Z","type":"RemoteQuery","query":"Quién es Luis Felipe Osorio","responseLength":98,"latencyMs":17512,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-02-26T20:53:49.114Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola, ¿cuáles son los beneficios de la empresa?","latencyMs":"0.30"}
+{"timestamp":"2026-02-26T20:54:05.161Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola","latencyMs":"0.20"}
+{"timestamp":"2026-02-26T20:55:10.688Z","type":"RemoteQuery","query":"Cuál es la política de calidad Dímelo en solo cinco palabras","responseLength":41,"latencyMs":17422,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-02-26T20:58:08.931Z","type":"RemoteQuery","query":"Quien el director de T.I","responseLength":32,"latencyMs":20301,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-02-26T21:14:00.953Z","type":"RemoteQuery","query":"Si trabajo 50 horas semanales cuanto me debe pagar de extras","responseLength":495,"latencyMs":33331,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-02-26T21:14:02.428Z","type":"RemoteQuery","query":"Cual es la politica de calidad","responseLength":487,"latencyMs":18696,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-02-26T21:15:23.089Z","type":"RemoteQuery","query":"Cuál es la política de vacaciones","responseLength":399,"latencyMs":37148,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-02-26T21:17:43.296Z","type":"RemoteQuery","query":"Cuantas horas debo trabajar para que me paguen como extras","responseLength":654,"latencyMs":30527,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-02-26T21:38:52.837Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola, Hola, que beneficios hay?","latencyMs":"0.40"}
+{"timestamp":"2026-02-26T21:38:52.843Z","type":"RemoteQuery","session_id":"SESS-VX0S9J6E1-MM3ZJ3CP","conversation_id":"CNV-RASBEPBJS-MM3ZJUOW","device_type":"desktop","status":"success","query":"Hola, Hola, que beneficios hay?","source":"remote","transcription_time_ms":0,"backend_latency_ms":11,"total_time_ms":11,"error_type":null,"userAgent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"}

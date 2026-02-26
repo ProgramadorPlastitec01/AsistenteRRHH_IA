@@ -1,21 +1,65 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useReducer } from 'react';
 import { motion, AnimatePresence, useMotionValue, useTransform } from 'framer-motion';
 import notebookLMClient from '../utils/notebookLMClient';
 import IntentEngine from '../utils/NexusIntentEngine'; // Updated import
+import logger from '../utils/logger';
 import { API_BASE_URL } from '../utils/apiConfig';
 import NexusCore from './NexusCore';
 import CompanyLogo from './CompanyLogo';
 import TypewriterText from './TypewriterText';
 import AnalyticsDashboard from './AnalyticsDashboard';
 
+const initialState = {
+    appState: 'INIT', // INIT, IDLE, LISTENING, PROCESSING, RESPONDING, ERROR
+    transcript: '',
+    response: '',
+    error: null,
+    processingStep: 0, // 1: Recibiendo, 2: Analizando, 3: Generando
+};
+
+function chatReducer(state, action) {
+    // Log for tablet debugging
+    console.log(`[State Transition] ${state.appState} -> ${action.type}`, action.payload !== undefined ? action.payload : '');
+
+    switch (action.type) {
+        case 'SET_INIT':
+            return { ...initialState, appState: 'INIT' };
+        case 'START_LISTENING':
+            return { ...state, appState: 'LISTENING', transcript: '', response: '', error: null };
+        case 'UPDATE_TRANSCRIPT':
+            return { ...state, transcript: action.payload };
+        case 'START_PROCESSING':
+            return { ...state, appState: 'PROCESSING', processingStep: 1, transcript: action.payload, error: null };
+        case 'SET_PROCESSING_STEP':
+            return { ...state, processingStep: action.payload };
+        case 'SET_RESPONSE':
+            return { ...state, response: action.payload, processingStep: 0 };
+        case 'START_RESPONDING':
+            return { ...state, appState: 'RESPONDING' };
+        case 'SET_ERROR':
+            return { ...state, appState: 'ERROR', error: action.payload, processingStep: 0 };
+        case 'RESET_IDLE':
+            // GUARD: Prevent premature reset if processing is active (WebKit fix)
+            if (state.appState === 'PROCESSING' && !action.force) {
+                console.warn('[Reducer] Guard: Blocked reset to IDLE because processing is active');
+                return state;
+            }
+            return { ...state, appState: 'IDLE', processingStep: 0 };
+        case 'CLEAR_RESPONSE':
+            return { ...state, response: '', appState: 'IDLE' };
+        case 'CLEAR_ERROR':
+            return { ...state, error: null, appState: state.appState === 'ERROR' ? 'IDLE' : state.appState };
+        default:
+            return state;
+    }
+}
+
 const VoiceChat = () => {
-    const [appState, setAppState] = useState('INIT'); // INIT, IDLE, LISTENING, PROCESSING, RESPONDING, ERROR
+    const [state, dispatch] = useReducer(chatReducer, initialState);
+    const { appState, transcript, response, error, processingStep } = state;
+
     const [isModalOpen, setIsModalOpen] = useState(false);
-    const [transcript, setTranscript] = useState('');
-    const [response, setResponse] = useState('');
-    const [error, setError] = useState(null);
     const [timeLeft, setTimeLeft] = useState(25);
-    const [processingStep, setProcessingStep] = useState(0); // 1: Recibiendo, 2: Analizando, 3: Generando
 
     // Analytics & Debug
     const [showAnalytics, setShowAnalytics] = useState(false);
@@ -94,6 +138,7 @@ const VoiceChat = () => {
         }
         notebookLMClient.initialize();
         notebookLMClient.resetConversation(); // Clear cache on startup to avoid 'Sy' bug
+        logger.startSession();
     }, []);
 
 
@@ -125,7 +170,7 @@ const VoiceChat = () => {
             interval = setInterval(() => {
                 setTimeLeft(prev => {
                     if (prev <= 1) {
-                        setResponse('');
+                        dispatch({ type: 'CLEAR_RESPONSE' });
                         return 25;
                     }
                     return prev - 1;
@@ -173,15 +218,15 @@ const VoiceChat = () => {
 
         utterance.onstart = () => {
             ttsInProgressRef.current = true;
-            setAppState('RESPONDING');
+            dispatch({ type: 'START_RESPONDING' });
         };
         utterance.onend = () => {
             ttsInProgressRef.current = false;
-            setAppState(prev => prev === 'RESPONDING' ? 'IDLE' : prev);
+            dispatch({ type: 'RESET_IDLE' });
         };
         utterance.onerror = () => {
             ttsInProgressRef.current = false;
-            setAppState(prev => prev === 'RESPONDING' ? 'IDLE' : prev);
+            dispatch({ type: 'RESET_IDLE' });
         };
 
         // Intentar seleccionar la mejor voz en español si está disponible
@@ -209,15 +254,17 @@ const VoiceChat = () => {
         const qStart = performance.now();
         console.log(`[Timing] 0ms — handleQuery started: "${queryText}"`);
 
+        // Telemetry
+        logger.startConversation(queryText);
+        logger.endPhase('transcription');
+        logger.startPhase('backend');
+
         // FORCE PROCESSING STATE IMMEDIATELY (Critical to prevent onend race condition)
-        setAppState('PROCESSING');
-        setProcessingStep(1); // Paso 1: Recibiendo solicitud
-        setError(null);
-        setTranscript(queryText);
+        dispatch({ type: 'START_PROCESSING', payload: queryText });
 
         // Timers para cambios de estado dinámicos (basados en tiempos promedio observados)
-        const step2Timer = setTimeout(() => setProcessingStep(2), 800);  // Analizando
-        const step3Timer = setTimeout(() => setProcessingStep(3), 3500); // Generando
+        const step2Timer = setTimeout(() => dispatch({ type: 'SET_PROCESSING_STEP', payload: 2 }), 800);  // Analizando
+        const step3Timer = setTimeout(() => dispatch({ type: 'SET_PROCESSING_STEP', payload: 3 }), 3500); // Generando
 
         try {
             abortControllerRef.current = new AbortController();
@@ -241,19 +288,27 @@ const VoiceChat = () => {
             if (finalResult.toLowerCase().startsWith('soy ') && !finalResult.startsWith('Soy')) finalResult = 'Soy' + finalResult.substring(3);
             if (finalResult.toLowerCase().startsWith('este ') && !finalResult.startsWith('Este')) finalResult = 'Este' + finalResult.substring(4);
 
-            const qLatency = (performance.now() - qStart).toFixed(0);
+            const qLatency = Math.round(performance.now() - qStart);
+            logger.endPhase('backend');
 
-            // Metrics update
-            const total = metricsRef.current.trigger ? (performance.now() - metricsRef.current.trigger).toFixed(0) : qLatency;
+            // Find source (local vs remote)
+            const isLocal = finalResult.includes('[Local') || finalResult.includes('Resuelto localmente');
+
             setPerformanceMetrics({
-                micMs: metricsRef.current.micMs || 0,
-                recMs: metricsRef.current.recMs || 0,
-                transMs: metricsRef.current.transMs || 0,
+                micMs: logger.timers.phases['transcription'] || 0,
+                recMs: 0,
+                transMs: 0,
                 aiMs: qLatency,
-                totalMs: total
+                totalMs: Math.round(performance.now() - logger.timers.total)
             });
 
-            setResponse(finalResult);
+            await logger.logConversation({
+                query: queryText,
+                status: 'success',
+                source: isLocal ? 'local' : 'remote'
+            });
+
+            dispatch({ type: 'SET_RESPONSE', payload: finalResult });
             // State will be set to RESPONDING by speakText -> utterance.onstart
             speakText(finalResult);
             console.log(`[VoiceChat] ✅ Respuesta recibida en ${qLatency}ms`);
@@ -261,15 +316,19 @@ const VoiceChat = () => {
         } catch (err) {
             if (err.name === 'AbortError') return;
 
-            // Report to backend
-            reportError('IA', 'handleQuery', err.message, err.stack, { query: queryText });
+            // Report to structured logger
+            logger.logError(
+                err.name === 'TimeoutError' ? 'TIMEOUT_ERROR' : 'BACKEND_ERROR',
+                'handleQuery',
+                err.message,
+                err.stack,
+                { query: queryText }
+            );
 
-            setError(err.message || 'Error al procesar solicitud');
-            setAppState('IDLE');
+            dispatch({ type: 'SET_ERROR', payload: err.message || 'Error al procesar solicitud' });
         } finally {
             clearTimeout(step2Timer);
             clearTimeout(step3Timer);
-            setProcessingStep(0);
             isLocked.current = false; // 🔓 UNLOCK AFTER ALL IS DONE
         }
     };
@@ -300,10 +359,7 @@ const VoiceChat = () => {
         }
 
         if (synthRef.current) synthRef.current.cancel();
-        setError(null);
-        setTranscript('');
-        setResponse('');
-        setAppState('LISTENING');
+        dispatch({ type: 'START_LISTENING' });
 
         // 1. Manejo de Conflicto de Hardware (Especialmente para Safari/iOS)
         // Forzamos la liberación del micro ANTES de empezar el reconocimiento en móviles
@@ -352,8 +408,7 @@ const VoiceChat = () => {
 
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (!SpeechRecognition) {
-            setError('Tu navegador no soporta reconocimiento de voz nativo.');
-            setAppState('IDLE');
+            dispatch({ type: 'SET_ERROR', payload: 'Tu navegador no soporta reconocimiento de voz nativo.' });
             return;
         }
 
@@ -373,6 +428,7 @@ const VoiceChat = () => {
         recognitionRef.current.maxAlternatives = 1;
 
         console.log(`[Mic] Recognition start (isRetry: ${isRetry})`);
+        logger.startPhase('transcription');
 
         recognitionRef.current.onresult = (e) => {
             const last = e.results.length - 1;
@@ -385,7 +441,7 @@ const VoiceChat = () => {
                 recognitionRef.current.stop();
                 handleQuery(text);
             } else {
-                setTranscript(text);
+                dispatch({ type: 'UPDATE_TRANSCRIPT', payload: text });
             }
         };
 
@@ -405,14 +461,14 @@ const VoiceChat = () => {
             }
 
             if (e.error !== 'no-speech') {
-                setError(`Reconocimiento: ${e.error}`);
-                reportError('Mic', 'NativeSpeech', e.error, null, {
+                dispatch({ type: 'SET_ERROR', payload: `Reconocimiento: ${e.error}` });
+                logger.logError('VOICE_ERROR', 'NativeSpeech', e.error, null, {
                     phase: 'NativeRecognition',
                     isRetry,
                     errorDetails: e.message || 'No details'
                 });
             }
-            setAppState('IDLE');
+            dispatch({ type: 'RESET_IDLE' });
         };
 
         recognitionRef.current.onend = () => {
@@ -420,7 +476,7 @@ const VoiceChat = () => {
             // GUARD: Only reset to IDLE if there's no query processing or lock active
             if (stateRef.current === 'LISTENING' && !isLocked.current && mountedRef.current) {
                 console.log('[Mic] Safe to reset to IDLE');
-                setAppState('IDLE');
+                dispatch({ type: 'RESET_IDLE' });
                 stopAnims();
             } else {
                 console.log('[Mic] Blocked reset to IDLE - Logic in transition or processing');
@@ -432,7 +488,7 @@ const VoiceChat = () => {
         } catch (e) {
             console.error('[Mic] Critical start failure:', e);
             if (!isRetry) startListening(true);
-            else setAppState('IDLE');
+            else dispatch({ type: 'RESET_IDLE' });
         }
     };
 
@@ -440,35 +496,10 @@ const VoiceChat = () => {
         if (recognitionRef.current) recognitionRef.current.stop();
         stopAnims();
         if (abortControllerRef.current) abortControllerRef.current.abort();
-        setAppState('IDLE');
+        dispatch({ type: 'RESET_IDLE', force: true });
     };
 
-    const reportError = async (type, module, message, stack = null, details = {}) => {
-        try {
-            const errorMetadata = {
-                userAgent: navigator.userAgent,
-                isSecure: window.isSecureContext,
-                screen: `${window.screen.width}x${window.screen.height}`,
-                language: navigator.language,
-                state: stateRef.current,
-                ...details
-            };
-
-            await fetch(`${API_BASE_URL}/api/report-error`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    type,
-                    module,
-                    message,
-                    stack,
-                    details: errorMetadata
-                })
-            });
-        } catch (e) {
-            console.warn('Could not report error to backend:', e.message);
-        }
-    };
+    const reportError = (...args) => logger.logError(...args);
 
     const getStateConfig = () => {
         switch (appState) {
@@ -526,7 +557,7 @@ const VoiceChat = () => {
             analyserRef.current.fftSize = 128;
 
             // 4. Solo tras éxito total, cambiar de vista
-            setAppState('IDLE');
+            dispatch({ type: 'RESET_IDLE', force: true });
 
         } catch (e) {
             console.error('[Mic] Error crítico en activación:', e.message);
@@ -537,8 +568,7 @@ const VoiceChat = () => {
             });
 
             // Si falla, al menos dejamos entrar para escritura manual
-            setError('No pudimos activar el micrófono. Usando modo teclado.');
-            setAppState('IDLE');
+            dispatch({ type: 'SET_ERROR', payload: 'No pudimos activar el micrófono. Usando modo teclado.' });
         }
     };
 
@@ -639,8 +669,7 @@ const VoiceChat = () => {
                                     <button
                                         onClick={() => {
                                             if (synthRef.current) synthRef.current.cancel();
-                                            setResponse('');
-                                            setAppState('IDLE');
+                                            dispatch({ type: 'CLEAR_RESPONSE' });
                                         }}
                                         className="px-10 py-4 bg-white/10 hover:bg-white/20 active:scale-95 rounded-full text-white font-bold transition-all border border-white/10 flex items-center gap-3 shadow-xl group whitespace-nowrap"
                                     >
@@ -774,7 +803,7 @@ const VoiceChat = () => {
                         <div className="bg-red-500/95 backdrop-blur-2xl text-white px-10 py-4 rounded-full shadow-4xl border border-red-400/40 flex items-center gap-4">
                             <span className="text-xl">⚠️</span>
                             <span className="font-bold tracking-wide">{error}</span>
-                            <button onClick={() => setError(null)} className="ml-6 bg-white/10 px-3 py-1 rounded-full hover:bg-white/20 transition-colors">✕</button>
+                            <button onClick={() => dispatch({ type: 'CLEAR_ERROR' })} className="ml-6 bg-white/10 px-3 py-1 rounded-full hover:bg-white/20 transition-colors">✕</button>
                         </div>
                     </motion.div>
                 )}

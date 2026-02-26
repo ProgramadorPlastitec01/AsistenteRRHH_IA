@@ -198,17 +198,23 @@ async function initializeMCP() {
         notebookId = 'DEMO_MODE';
     }
 
-    // Start periodic background auth refresh
+    // Start periodic background auth refresh with safety timeout
     if (authRefreshInterval) clearInterval(authRefreshInterval);
     authRefreshInterval = setInterval(async () => {
         try {
             console.log('🔄 Performing background session refresh...');
             if (mcpClient) {
-                await mcpClient.callTool({ name: 'refresh_auth', arguments: {} });
+                // Use a promise race to prevent the interval from hanging the event loop
+                const refreshPromise = mcpClient.callTool({ name: 'refresh_auth', arguments: {} });
+                const timeoutPromise = new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('Refresh auth timeout (30s)')), 30000)
+                );
+
+                await Promise.race([refreshPromise, timeoutPromise]);
                 console.log('✅ Session refreshed successfully in background');
             }
         } catch (e) {
-            console.warn('⚠️ Passive session refresh failed (will retry next cycle):', e.message);
+            console.warn('⚠️ Passive session refresh failed or timed out:', e.message);
         }
     }, SESSION_REFRESH_INTERVAL);
 

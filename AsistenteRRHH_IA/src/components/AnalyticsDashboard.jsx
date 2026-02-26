@@ -57,13 +57,15 @@ const AnalyticsDashboard = ({ onClose }) => {
         let savedTimeSeconds = 0;
 
         rawEvents.forEach(e => {
-            if (e.type === 'RemoteQuery') {
+            const d = e.data || {};
+            const source = d.source || (e.type === 'RemoteQuery' ? 'remote' : 'local');
+
+            if (source === 'remote') {
                 remoteCount++;
-            } else if (e.type === 'LocalIntentResolved' || e.type === 'LocalCacheHit') {
+            } else {
                 localCount++;
-                // Estimamos que una consulta remota tarda 10s y una local 0.01s
-                // Ahorro por cada local = ~9.99s
-                savedTimeSeconds += 9.9;
+                // Ahorro: Si es local, ahorramos el tiempo promedio de una consulta remota (~4.5s)
+                savedTimeSeconds += 4.5;
             }
         });
 
@@ -292,28 +294,48 @@ const AnalyticsDashboard = ({ onClose }) => {
                                 {loading && events.length === 0 ? (
                                     <div className="text-center py-10 text-white/20">Cargando datos...</div>
                                 ) : (
-                                    events.map((e, idx) => (
-                                        <motion.div
-                                            key={idx}
-                                            initial={{ opacity: 0, x: -20 }}
-                                            animate={{ opacity: 1, x: 0 }}
-                                            transition={{ delay: idx * 0.03 }}
-                                            className="flex items-center gap-4 p-3 hover:bg-white/5 rounded-lg border border-transparent hover:border-white/5 transition-colors group"
-                                        >
-                                            <div className="w-20 text-[10px] text-white/30 font-mono flex-shrink-0">
-                                                {new Date(e.timestamp).toLocaleTimeString()}
-                                            </div>
-                                            <div className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold border ${getBadgeColor(e.type)} w-32 text-center flex-shrink-0`}>
-                                                {e.type.replace('Local', '').replace('Remote', '')}
-                                            </div>
-                                            <div className="flex-grow text-sm text-white/80 truncate font-sans group-hover:text-white transition-colors">
-                                                "{e.query || e.data?.query || '---'}"
-                                            </div>
-                                            <div className="w-20 text-right text-xs font-mono text-white/50">
-                                                {e.latencyMs || e.data?.latencyMs || 0}ms
-                                            </div>
-                                        </motion.div>
-                                    ))
+                                    events.map((e, idx) => {
+                                        const d = e.data || {};
+                                        const isStructured = !!d.session_id;
+                                        return (
+                                            <motion.div
+                                                key={idx}
+                                                initial={{ opacity: 0, x: -20 }}
+                                                animate={{ opacity: 1, x: 0 }}
+                                                transition={{ delay: idx * 0.02 }}
+                                                className="flex flex-col p-3 hover:bg-white/5 rounded-lg border border-transparent hover:border-white/5 transition-colors group"
+                                            >
+                                                <div className="flex items-center gap-4">
+                                                    <div className="w-20 text-[10px] text-white/30 font-mono flex-shrink-0">
+                                                        {new Date(e.timestamp || d.timestamp).toLocaleTimeString()}
+                                                    </div>
+                                                    <div className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold border ${getBadgeColor(e.type)} w-32 text-center flex-shrink-0`}>
+                                                        {e.type.replace('Local', '').replace('Remote', '')}
+                                                    </div>
+                                                    <div className="flex-grow text-sm text-white/80 truncate font-sans group-hover:text-white transition-colors">
+                                                        "{d.query || e.query || '---'}"
+                                                    </div>
+                                                    <div className="text-right text-xs font-mono text-white/50 flex items-center gap-3">
+                                                        {isStructured && (
+                                                            <span className="text-[10px] text-blue-400/50 hidden md:inline">
+                                                                T:{d.transcription_time_ms}ms | B:{d.backend_latency_ms}ms
+                                                            </span>
+                                                        )}
+                                                        <span className="w-16 font-bold text-white/70">
+                                                            {d.total_time_ms || e.latencyMs || 0}ms
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                                {isStructured && (
+                                                    <div className="mt-1 flex gap-4 text-[9px] text-white/20 font-mono pl-24">
+                                                        <span>SESS: {d.session_id.split('-')[1]}</span>
+                                                        <span>CONV: {d.conversation_id.split('-')[1]}</span>
+                                                        <span>DEVICE: {d.device_type}</span>
+                                                    </div>
+                                                )}
+                                            </motion.div>
+                                        );
+                                    })
                                 )}
                             </div>
                         </div>
