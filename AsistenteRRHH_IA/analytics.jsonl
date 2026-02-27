@@ -251,3 +251,5 @@
 {"timestamp":"2026-02-26T18:33:34.051Z","type":"RemoteQuery","query":"Quién es Luis Felipe sol","responseLength":98,"latencyMs":14626,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
 {"timestamp":"2026-02-26T18:33:41.946Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola","latencyMs":"0.60"}
 {"timestamp":"2026-02-26T18:33:50.538Z","type":"LocalIntentResolved","intentType":"identity","query":"quién eres","latencyMs":"0.50"}
+{"timestamp":"2026-02-27T17:54:55.317Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola","latencyMs":"1.50"}
+{"timestamp":"2026-02-27T17:55:32.301Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola buenos días","latencyMs":"0.50"}
