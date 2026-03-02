@@ -17,8 +17,14 @@ import 'dotenv/config';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import os from 'os';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
 import fs from 'fs';
 import path from 'path';
+
+// --- NUEVOS SERVICIOS DE CACHÉ Y PRIVACIDAD ---
+import DatabaseService from './services/database.js';
+import PrivacyService from './services/privacy.js';
 import multer from 'multer';
 
 // Multer is not longer needed as Whisper was removed
@@ -28,6 +34,10 @@ const app = express();
 const PORT = 3000;
 const LOG_FILE = path.join(process.cwd(), 'analytics.jsonl');
 const ERRORS_FILE = path.join(process.cwd(), 'errors.jsonl');
+
+// Auth error pattern used in the query retry logic
+// Defined at module level to ensure availability in all closures
+const AUTH_ERROR_RE = /\b(Authentication expired|re-authenticate|session expired|login required|401)\b/i;
 
 /**
  * Helper to log analytics events to JSONL file
@@ -165,17 +175,17 @@ async function initializeMCP() {
             console.log(`Found RRHH notebook ID: ${notebookId}`);
         }
 
-        // Configure chat settings for shorter, more specific responses
+        // Configure chat settings for balanced responses
         try {
             await mcpClient.callTool({
                 name: 'chat_configure',
                 arguments: {
                     notebook_id: notebookId,
-                    response_length: 'shorter',
+                    response_length: 'medium', // Adjusted to 'medium' for balance
                     goal: 'default'
                 }
             });
-            console.log('Chat configured for shorter responses');
+            console.log('Chat configured for balanced responses');
         } catch (configError) {
             console.warn('Could not configure chat settings, continuing with defaults:', configError.message);
         }
@@ -212,20 +222,12 @@ async function initializeMCP() {
         }
     }, SESSION_REFRESH_INTERVAL);
 
-    // Watch for manual auth.json changes to auto-reload
-    // Guard flag prevents registering multiple watchers on successive calls to initializeMCP()
-    if (fs.existsSync(AUTH_FILE_PATH) && !authWatcherActive) {
-        authWatcherActive = true;
-        fs.watch(AUTH_FILE_PATH, async (eventType) => {
-            if (eventType === 'change') {
-                console.log('🔄 auth.json change detected. Re-initializing MCP...');
-                if (mcpClient) {
-                    try { await mcpClient.close(); } catch (e) { }
-                    isInitialized = false;
-                    await initializeMCP();
-                }
-            }
-        });
+    // Initialize SQLite Database
+    try {
+        await DatabaseService.init();
+        console.log('✅ SQLite Cache Database Initialized successfully');
+    } catch (dbError) {
+        console.warn('⚠️ SQLite Cache could not be initialized:', dbError.message);
     }
 }
 
@@ -397,6 +399,31 @@ app.get('/api/system-status', async (req, res) => {
 });
 
 /**
+ * Valida si una respuesta de la IA es negativa o indica falta de información
+ */
+const isResponseInvalid = (text) => {
+    const invalidMarkers = [
+        "no encuentro información",
+        "no tengo acceso",
+        "base de conocimientos actual",
+        "no se menciona",
+        "no tengo datos",
+        "no tengo información disponible",
+        "lo siento, no encuentro",
+        "lo siento, no tengo"
+    ];
+    const lowerText = text.toLowerCase();
+    return invalidMarkers.some(marker => lowerText.includes(marker));
+};
+
+/**
+ * Reformula una consulta para mejorar la probabilidad de encontrar información
+ */
+const reformulateQuery = (originalQuery) => {
+    return `Información detallada sobre: "${originalQuery}", basándote exclusivamente en el Reglamento Interno de Trabajo, políticas de RRHH y documentos oficiales de PLASTITEC.`;
+};
+
+/**
  * Query endpoint - Main interface for frontend
  */
 app.post('/api/query', async (req, res) => {
@@ -418,57 +445,66 @@ app.post('/api/query', async (req, res) => {
 
         console.log(`Processing query: "${query}"`);
 
+        // --- PASO 1: Búsqueda en Caché Local (SQLite) ---
+        try {
+            const cachedResult = await DatabaseService.findSimilar(query);
+            if (cachedResult) {
+                console.log(`🚀 [Cache Hit] Respuesta encontrada en SQLite (Similitud >= 85%)`);
+                return res.json({
+                    response: cachedResult.answer,
+                    outOfScope: false,
+                    cached: true,
+                    conversationId: conversationId || 'cached-session'
+                });
+            }
+        } catch (cacheError) {
+            console.error('⚠️ Error al buscar en caché:', cacheError.message);
+        }
+
         // FALLBACK: If in Demo Mode, return simulated responses
         if (notebookId === 'DEMO_MODE') {
             const lowerQuery = query.toLowerCase();
             let simulatedResponse = 'Lo siento, no encuentro esa información en mi base de conocimientos actual. Por favor, contacta con RRHH.';
 
-            if (lowerQuery.includes('vacaciones')) simulatedResponse = 'Tienes derecho a 22 días de vacaciones. Regístralas en el portal de empleados.';
-            if (lowerQuery.includes('pago') || lowerQuery.includes('nómina')) simulatedResponse = 'La nómina se paga el último viernes de cada mes.';
-            if (lowerQuery.includes('horario')) simulatedResponse = 'El horario es de 9:00 a 18:00, de lunes a viernes.';
+            if (lowerQuery.includes('horario')) simulatedResponse = 'El horario de oficina es de lunes a viernes, de 8:00 AM a 5:30 PM.';
+            if (lowerQuery.includes('vacaciones')) simulatedResponse = 'Tienes derecho a 15 días hábiles de vacaciones por año laborado.';
+            if (lowerQuery.includes('pago')) simulatedResponse = 'La nómina se paga los días 15 y 30 de cada mes.';
+
+            // --- PROCESAMIENTO DE CACHÉ PARA DEMO_MODE ---
+            // Solo para consistencia en modo demo interno si se desea, 
+            // pero normalmente se desactiva para no llenar la DB con basura.
+            /* 
+            const isSafe = PrivacyService.isSafeToCache(query, simulatedResponse);
+            if (isSafe) {
+                await DatabaseService.store(query, simulatedResponse, 'general');
+            }
+            */
 
             return res.json({
-                response: simulatedResponse, // Clean response for demo
-                outOfScope: false
+                response: simulatedResponse,
+                outOfScope: false,
+                simulated: true
             });
         }
 
-        // B1 FIX/REFINEMENT: Apply strict constraints to force direct, grounded responses.
-        const enhancedQuery = `--------------------------------------------------
-INSTRUCCIONES CRÍTICAS PARA LA IA
---------------------------------------------------
-1. Responde únicamente a lo que se pregunta.
-2. Usa solo información encontrada en NotebookLM.
-3. No agregues explicaciones adicionales.
-4. No describas los documentos consultados.
-5. No expliques el proceso de búsqueda.
-6. No agregues interpretaciones propias.
-7. No amplíes la respuesta con contexto innecesario.
-8. Si la información no existe en NotebookLM, responde exactamente:
-   "No se encontró información relacionada en los documentos disponibles."
-
-FORMATO DE RESPUESTA OBLIGATORIO:
-- Un único bloque de respuesta.
-- Máximo 1–2 párrafos.
-- Lenguaje claro y profesional.
-- Sin introducciones como "Según la información proporcionada...", "De acuerdo con los documentos...", etc.
---------------------------------------------------
-
-CONSULTA: ${query}`;
-
-        // Auth error pattern — B2 FIX: precise regex to avoid false positives on words like
-        // "autorización" or "autenticación de empleados" that would trigger a useless retry.
-        const AUTH_ERROR_RE = /\b(Authentication expired|re-authenticate|session expired|login required|401)\b/i;
-
-        const performQuery = async (retryCount = 0) => {
+        const performQuery = async (queryToUse, retryCount = 0) => {
             const mcpStart = Date.now();
-            console.log(`[Query] MCP call started at +${mcpStart - start}ms`);
+            console.log(`[Query] MCP call started at +${mcpStart - start}ms (Retry: ${retryCount})`);
+
+            // Always use the acting persona
+            const finalQuery = `ACTUANDO COMO ASISTENTE DE RRHH DE PLASTITEC:
+De acuerdo con el Reglamento Interno de Trabajo y los documentos oficiales: ${queryToUse}.
+
+INSTRUCCIÓN:
+Proporciona una respuesta definitiva, clara y profesional basada en los documentos. 
+Usa un tono humano y cercano (ej. "¡Hola! Te explico...").
+Si los documentos prohíben o no contemplan lo consultado, indícalo con seguridad.`;
 
             const result = await mcpClient.callTool({
                 name: 'notebook_query',
                 arguments: {
                     notebook_id: notebookId,
-                    query: enhancedQuery,
+                    query: finalQuery,
                     conversation_id: conversationId || undefined
                 }
             });
@@ -478,12 +514,12 @@ CONSULTA: ${query}`;
 
             const rawText = result.content[0].text;
 
-            // B2: only retry on genuine auth errors, not every occurrence of the substring
+            // B2: only retry on genuine auth errors
             if (AUTH_ERROR_RE.test(rawText)) {
                 if (retryCount === 0) {
                     console.log('💡 Auth error detected in content. Attempting refresh and retry...');
                     await mcpClient.callTool({ name: 'refresh_auth', arguments: {} });
-                    return await performQuery(1);
+                    return await performQuery(queryToUse, 1);
                 }
                 throw new Error('Sesión expirada persistentemente. Por favor, ejecuta "npx notebooklm-mcp-server auth".');
             }
@@ -494,29 +530,58 @@ CONSULTA: ${query}`;
             };
         };
 
-        const { text: rawText, conversationId: finalConversationId } = await performQuery();
-        const backendTotal = Date.now() - start;
-        console.log(`[Query] ✅ Complete. Backend total: ${backendTotal}ms`);
-
+        // --- FIRST ATTEMPT ---
+        let { text: rawText, conversationId: finalConversationId } = await performQuery(query);
         let responseText = rawText;
         let finalId = finalConversationId;
 
-        // Intentar parsear si el resultado es un JSON string
-        try {
-            const parsed = JSON.parse(rawText);
-            if (parsed.answer) responseText = parsed.answer;
-            if (parsed.conversation_id) finalId = parsed.conversation_id;
-        } catch (e) { }
+        // Limpieza y parseo básico
+        const cleanResponse = (text) => {
+            let processed = text;
+            try {
+                const parsed = JSON.parse(text);
+                if (parsed.answer) processed = parsed.answer;
+            } catch (e) { }
+            return processed.replace(/\[\d+\]/g, '').trim();
+        };
 
-        // Limpieza básica (eliminando referencias estilo [1], [2])
-        responseText = responseText
-            .replace(/\[\d+\]/g, '')
-            .trim();
+        responseText = cleanResponse(responseText);
 
-        // Check if out of scope or not found
-        const isNotFound = responseText.includes("No se encontró información relacionada en los documentos disponibles");
+        // --- VALIDA SI REINTENTAR (SI ES INVÁLIDA Y NO HA REINTENTADO) ---
+        if (isResponseInvalid(responseText) && notebookId !== 'DEMO_MODE') {
+            console.log('🔄 [Accuracy Boost] Respuesta negativa detectada. Reintentando con reformulación...');
+            const reformulated = reformulateQuery(query);
+            const secondAttempt = await performQuery(reformulated, 1);
 
-        if (isNotFound) {
+            const secondText = cleanResponse(secondAttempt.text);
+
+            // Si la segunda respuesta NO es inválida, la usamos
+            if (!isResponseInvalid(secondText)) {
+                console.log('✅ [Accuracy Boost] Segunda consulta exitosa.');
+                responseText = secondText;
+                finalId = secondAttempt.conversationId;
+            } else {
+                console.log('❌ [Accuracy Boost] Segunda consulta también falló.');
+            }
+        }
+
+        const backendTotal = Date.now() - start;
+        console.log(`[Query] ✅ Complete. Backend total: ${backendTotal}ms`);
+
+        // --- PASO 2: Validación de Privacidad y Guardado en Caché ---
+        const finalIsInvalid = isResponseInvalid(responseText);
+
+        if (!finalIsInvalid && !notebookId.includes('DEMO')) {
+            const isSafe = PrivacyService.isSafeToCache(query, responseText);
+            if (isSafe) {
+                console.log('💾 [Cache Save] Respuesta válida detectada. Guardando en SQLite...');
+                DatabaseService.store(query, responseText, 'general').catch(err => {
+                    console.error('⚠️ Error al guardar en caché:', err.message);
+                });
+            }
+        }
+
+        if (finalIsInvalid) {
             return res.json({
                 response: responseText,
                 outOfScope: true,
