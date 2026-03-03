@@ -106,6 +106,74 @@ let mcpClient = null;
 let notebookId = null;
 let isInitialized = false;
 
+// ── Knowledge Version — sistema de revalidación inteligente ──
+// Persiste entre reinicios del servidor en el archivo knowledge_version.json
+const KV_FILE = path.join(process.cwd(), 'knowledge_version.json');
+let knowledgeVersion = (() => {
+    try {
+        if (fs.existsSync(KV_FILE)) {
+            const data = JSON.parse(fs.readFileSync(KV_FILE, 'utf8'));
+            return data.version || 0;
+        }
+    } catch (e) { /* archivo corregido en próximo bump */ }
+    return 0;
+})();
+console.log(`📚 Knowledge Version cargada: v${knowledgeVersion}`);
+
+/**
+ * Revalida un registro SQLite en segundo plano sin bloquear la respuesta al usuario.
+ * Solo actualiza SQLite si la respuesta de NotebookLM cambió significativamente.
+ *
+ * @param {string} query        Pregunta original del usuario
+ * @param {Object} cachedRow    Fila de knowledge_base a revalidar
+ */
+async function revalidateInBackground(query, cachedRow) {
+    try {
+        console.log(`🔍 [Revalidation] Iniciando para: "${query.substring(0, 60)}" (id:${cachedRow.id})`);
+
+        // Reutilizar el mismo prompt del query handler
+        const revalQuery = `ASISTENTE DE RRHH CORPORATIVO — KIOSKO PLASTITEC.
+Consultas basadas exclusivamente en el Reglamento Interno de Trabajo (RIT) y documentos oficiales internos.
+
+Consulta del colaborador: ${query}
+
+INSTRUCCIONES DE RESPUESTA (seguir estrictamente):
+- Máximo 6 a 8 líneas en total.
+- Sin frases de apertura. Sin emojis. Sin encabezados. Lenguaje profesional y neutro.
+
+PROCESO DE ANÁLISIS OBLIGATORIO antes de responder:
+1. Buscar si el documento menciona el tema de forma DIRECTA.
+2. Si no, buscar normas, reglas, procedimientos o condiciones RELACIONADAS o INDIRECTAS.
+3. Responder con lo que sí esté documentado, aunque sea información vinculada.
+4. SOLO si no existe ninguna mención directa NI indirecta, indicarlo en una frase breve.
+
+FORMATO CUANDO NO HAY DATO EXACTO:
+- Primera línea: indicar que el RIT no menciona ese punto específico.
+- Segunda parte: informar lo que el documento sí establece sobre el tema relacionado.
+- Nunca inventar ni asumir información no documentada.`;
+
+        const result = await mcpClient.callTool({
+            name: 'notebook_query',
+            arguments: { notebook_id: notebookId, query: revalQuery }
+        });
+
+        const newAnswer = result.content[0].text
+            .replace(/\[\d+\]/g, '')
+            .trim();
+
+        if (DatabaseService.hasSignificantChange(cachedRow.answer, newAnswer)) {
+            await DatabaseService.markRevalidated(cachedRow.id, newAnswer, knowledgeVersion);
+            console.log(`✅ [Revalidation] Registro id:${cachedRow.id} ACTUALIZADO con nueva respuesta.`);
+            logAnalyticsEvent('RevalidationUpdated', { id: cachedRow.id, query });
+        } else {
+            await DatabaseService.markRevalidated(cachedRow.id, null, knowledgeVersion);
+            console.log(`✔ [Revalidation] Registro id:${cachedRow.id} sin cambios significativos — solo versión actualizada.`);
+        }
+    } catch (err) {
+        console.warn(`⚠️ [Revalidation] Error en background para id:${cachedRow.id}: ${err.message}`);
+    }
+}
+
 /**
  * Initialize MCP connection and find RRHH notebook
  */
@@ -243,10 +311,65 @@ app.get('/api/health', (req, res) => {
 });
 
 /**
+ * Knowledge Version — GET
+ * Retorna la versión actual del Knowledge Base y estadísticas de revalidación.
+ */
+app.get('/api/knowledge-version', async (req, res) => {
+    try {
+        const stale = await DatabaseService.getStaleRecords(knowledgeVersion, 1000);
+        res.json({
+            version: knowledgeVersion,
+            staleRecords: stale.length,
+            message: stale.length > 0
+                ? `${stale.length} registro(s) pendiente(s) de revalidación`
+                : 'Base de conocimiento al día'
+        });
+    } catch (e) {
+        res.json({ version: knowledgeVersion, staleRecords: 0 });
+    }
+});
+
+/**
+ * Bump Knowledge Version — POST
+ * Incrementa la versión del Knowledge Base.
+ * Llamar cada vez que se agrega o actualiza una fuente en NotebookLM.
+ * Esto marca todos los registros actuales para revalidación automática en background.
+ */
+app.post('/api/bump-knowledge-version', async (req, res) => {
+    try {
+        knowledgeVersion += 1;
+
+        // Persistir en disco para sobrevivir reinicios del servidor
+        fs.writeFileSync(KV_FILE, JSON.stringify({
+            version: knowledgeVersion,
+            updatedAt: new Date().toISOString()
+        }), 'utf8');
+
+        // Contar cuántos registros quedan desactualizados
+        const stale = await DatabaseService.getStaleRecords(knowledgeVersion, 1000);
+
+        console.log(`📚 [KnowledgeVersion] Bumped a v${knowledgeVersion}. Registros a revalidar: ${stale.length}`);
+        logAnalyticsEvent('KnowledgeVersionBumped', { version: knowledgeVersion, staleCount: stale.length });
+
+        res.json({
+            success: true,
+            version: knowledgeVersion,
+            staleRecords: stale.length,
+            message: `Knowledge Base actualizado a v${knowledgeVersion}. ${stale.length} registro(s) se revalidarán automáticamente en background.`
+        });
+    } catch (error) {
+        console.error('Error bumping knowledge version:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+
+/**
  * Analytics Endpoint
  * Receives logs from frontend interactions (local cache hits, intents, etc.)
  */
 app.post('/api/analytics', (req, res) => {
+
     const { type, data } = req.body;
     if (!type) return res.status(400).json({ error: 'Missing log type' });
 
@@ -445,20 +568,34 @@ app.post('/api/query', async (req, res) => {
 
         console.log(`Processing query: "${query}"`);
 
-        // --- PASO 1: Búsqueda en Caché Local (SQLite) ---
+        // --- PASO 1: Búsqueda en Caché Local (SQLite — fuente de verdad persistente) ---
         try {
             const cachedResult = await DatabaseService.findSimilar(query);
             if (cachedResult) {
-                console.log(`🚀 [Cache Hit] Respuesta encontrada en SQLite (Similitud >= 85%)`);
+                const cacheType = cachedResult.question_normalized === DatabaseService.normalize(query)
+                    ? 'exacta'
+                    : 'similar';
+
+                // Verificar si necesita revalidación en background
+                const shouldRevalidate = DatabaseService.needsRevalidation(cachedResult, knowledgeVersion);
+                if (shouldRevalidate && mcpClient && notebookId !== 'DEMO_MODE') {
+                    console.log(`🔄 [Revalidation] Revalidación pendiente para id:${cachedResult.id} — ejecutando en background...`);
+                    // setImmediate: responde primero, revalida después. No bloquea UI.
+                    setImmediate(() => revalidateInBackground(query, cachedResult));
+                }
+
+                console.log(`🚀 [SQLite Cache Hit] Coincidencia ${cacheType} — uso #${cachedResult.usage_count + 1}${shouldRevalidate ? ' (revalidando en BG)' : ''}`);
                 return res.json({
                     response: cachedResult.answer,
                     outOfScope: false,
                     cached: true,
+                    cacheSource: 'sqlite',
+                    revalidating: shouldRevalidate,
                     conversationId: conversationId || 'cached-session'
                 });
             }
         } catch (cacheError) {
-            console.error('⚠️ Error al buscar en caché:', cacheError.message);
+            console.error('⚠️ Error al buscar en caché SQLite:', cacheError.message);
         }
 
         // FALLBACK: If in Demo Mode, return simulated responses
@@ -492,13 +629,27 @@ app.post('/api/query', async (req, res) => {
             console.log(`[Query] MCP call started at +${mcpStart - start}ms (Retry: ${retryCount})`);
 
             // Always use the acting persona
-            const finalQuery = `ACTUANDO COMO ASISTENTE DE RRHH DE PLASTITEC:
-De acuerdo con el Reglamento Interno de Trabajo y los documentos oficiales: ${queryToUse}.
+            const finalQuery = `ASISTENTE DE RRHH CORPORATIVO — KIOSKO PLASTITEC.
+Consultas basadas exclusivamente en el Reglamento Interno de Trabajo (RIT) y documentos oficiales internos.
 
-INSTRUCCIÓN:
-Proporciona una respuesta definitiva, clara y profesional basada en los documentos. 
-Usa un tono humano y cercano (ej. "¡Hola! Te explico...").
-Si los documentos prohíben o no contemplan lo consultado, indícalo con seguridad.`;
+Consulta del colaborador: ${queryToUse}
+
+INSTRUCCIONES DE RESPUESTA (seguir estrictamente):
+- Máximo 6 a 8 líneas en total.
+- Sin frases de apertura. Sin emojis. Sin encabezados. Lenguaje profesional y neutro.
+
+PROCESO DE ANÁLISIS OBLIGATORIO antes de responder:
+1. Buscar si el documento menciona el tema de forma DIRECTA.
+2. Si no, buscar normas, reglas, procedimientos o condiciones RELACIONADAS o INDIRECTAS.
+3. Responder con lo que sí esté documentado, aunque sea información vinculada.
+4. SOLO si no existe ninguna mención directa NI indirecta, indicarlo en una frase breve.
+
+FORMATO CUANDO NO HAY DATO EXACTO:
+- Primera línea: indicar que el RIT no menciona ese punto específico.
+- Segunda parte: informar lo que el documento sí establece sobre el tema relacionado.
+- Nunca inventar ni asumir información no documentada.
+
+EJEMPLO OPCIONAL: Agregar ejemplo breve (máximo 2 líneas) solo si la respuesta involucra una política, procedimiento o norma que puede interpretarse de varias formas. Introducir con "Ejemplo:" o "Por ejemplo:". Omitir si la respuesta es un dato puntual o afirmativa/negativa simple.`;
 
             const result = await mcpClient.callTool({
                 name: 'notebook_query',
@@ -568,16 +719,25 @@ Si los documentos prohíben o no contemplan lo consultado, indícalo con segurid
         const backendTotal = Date.now() - start;
         console.log(`[Query] ✅ Complete. Backend total: ${backendTotal}ms`);
 
-        // --- PASO 2: Validación de Privacidad y Guardado en Caché ---
+        // --- PASO 2: Validación de Privacidad y Persistencia en SQLite ---
         const finalIsInvalid = isResponseInvalid(responseText);
 
-        if (!finalIsInvalid && !notebookId.includes('DEMO')) {
+        if (finalIsInvalid) {
+            console.log('ℹ️ [SQLite] No guardado: respuesta marcada como fuera de alcance.');
+        } else if (notebookId.includes('DEMO')) {
+            console.log('ℹ️ [SQLite] No guardado: servidor en DEMO_MODE.');
+        } else {
             const isSafe = PrivacyService.isSafeToCache(query, responseText);
             if (isSafe) {
-                console.log('💾 [Cache Save] Respuesta válida detectada. Guardando en SQLite...');
-                DatabaseService.store(query, responseText, 'general').catch(err => {
-                    console.error('⚠️ Error al guardar en caché:', err.message);
-                });
+                // UPSERT real — incluye knowledge_version actual para tracking de revalidación
+                const saveResult = await DatabaseService.storeOrUpdate(query, responseText, 'general', 'notebooklm', knowledgeVersion);
+                if (saveResult === 'inserted') {
+                    console.log(`💾 [SQLite] ✅ Nueva entrada persistida (v${knowledgeVersion}).`);
+                } else if (saveResult === 'updated') {
+                    console.log('🔄 [SQLite] Entrada existente: uso incrementado.');
+                }
+            } else {
+                console.log('⛔ [SQLite] No guardado: contenido marcado como sensible por PrivacyService.');
             }
         }
 

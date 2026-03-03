@@ -331,3 +331,30 @@
 {"timestamp":"2026-03-02T21:08:53.350Z","type":"RemoteQuery","query":"Cuanto gana fabian el programador","responseLength":1214,"latencyMs":23973,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
 {"timestamp":"2026-03-02T21:09:51.773Z","type":"RemoteQuery","query":"Quien es luis felipe osorio","responseLength":413,"latencyMs":16219,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
 {"timestamp":"2026-03-02T21:09:59.458Z","type":"LocalCacheHit","query":"Quien es luis felipe osorio","latencyMs":"0.30"}
+{"timestamp":"2026-03-02T22:07:01.646Z","type":"RemoteQuery","query":"Quien es luis felipe osorio","responseLength":333,"latencyMs":14975,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-02T22:07:15.535Z","type":"RamCacheHit","query":"Quien es luis felipe osorio","latencyMs":"0.60"}
+{"timestamp":"2026-03-02T22:07:43.885Z","type":"RemoteQuery","query":"Quien es sebastian","responseLength":1171,"latencyMs":21535,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-02T22:07:58.177Z","type":"RamCacheHit","query":"Quien es luis felipe osorio","latencyMs":"0.60"}
+{"timestamp":"2026-03-03T14:26:10.387Z","type":"RemoteQuery","query":"Politica de calidad","responseLength":1882,"latencyMs":35352,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T14:38:46.693Z","type":"RemoteQuery","query":"Cual es la politica calidad","responseLength":78,"latencyMs":21009,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T14:39:21.423Z","type":"RemoteQuery","query":"Quien es luis felipe osorio","responseLength":83,"latencyMs":21893,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T14:41:49.272Z","type":"RemoteQuery","query":"Seguro de Gastos Médicos","responseLength":78,"latencyMs":21974,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T14:43:31.018Z","type":"RemoteQuery","query":"Vacaciones y Días Libres","responseLength":407,"latencyMs":22928,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T14:46:11.589Z","type":"RemoteQuery","query":"Que beneficios tengo en plastitec","responseLength":469,"latencyMs":45622,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T14:47:14.333Z","type":"RemoteQuery","query":"Tengo algún beneficios con mi almuerzo","responseLength":78,"latencyMs":18893,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T15:04:30.780Z","type":"RemoteQuery","query":"Tengo algún beneficios con mi almuerzo","responseLength":534,"latencyMs":30794,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T15:44:14.353Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola","latencyMs":"0.20"}
+{"timestamp":"2026-03-03T16:14:06.336Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola","latencyMs":"0.40"}
+{"timestamp":"2026-03-03T16:14:56.352Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola","latencyMs":"0.30"}
+{"timestamp":"2026-03-03T16:16:34.691Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola","latencyMs":"0.40"}
+{"timestamp":"2026-03-03T16:17:38.149Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola","latencyMs":"0.30"}
+{"timestamp":"2026-03-03T16:20:32.201Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola","latencyMs":"0.30"}
+{"timestamp":"2026-03-03T16:21:03.756Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola","latencyMs":"0.40"}
+{"timestamp":"2026-03-03T16:21:17.338Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola","latencyMs":"0.20"}
+{"timestamp":"2026-03-03T16:22:12.140Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola","latencyMs":"0.10"}
+{"timestamp":"2026-03-03T16:23:02.013Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola","latencyMs":"0.20"}
+{"timestamp":"2026-03-03T16:24:31.816Z","type":"RemoteQuery","query":"¿Cómo se pagan las horas extras y recargos nocturnos?","responseLength":634,"latencyMs":27291,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T16:24:34.384Z","type":"RemoteQuery","query":"¿Cómo se pagan las horas extras y recargos nocturnos?","responseLength":704,"latencyMs":38976,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T16:28:35.703Z","type":"RemoteQuery","query":"Salarios y dotación","responseLength":666,"latencyMs":30347,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T16:33:12.752Z","type":"Error","message":"Sesión expirada persistentemente. Por favor, ejecuta \"npx notebooklm-mcp-server auth\".","stack":"Error: Sesión expirada persistentemente. Por favor, ejecuta \"npx notebooklm-mcp-server auth\".\n    at performQuery (file:///C:/AI/AsistenteRRHH_IA/AsistenteRRHH_IA/server.js:675:23)\n    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at async performQuery (file:///C:/AI/AsistenteRRHH_IA/AsistenteRRHH_IA/server.js:673:28)\n    at async file:///C:/AI/AsistenteRRHH_IA/AsistenteRRHH_IA/server.js:685:70"}
+{"timestamp":"2026-03-03T16:34:45.580Z","type":"RemoteQuery","query":"Licencias legales","responseLength":900,"latencyMs":27297,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
