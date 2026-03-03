@@ -35,6 +35,16 @@ const PORT = 3000;
 const LOG_FILE = path.join(process.cwd(), 'analytics.jsonl');
 const ERRORS_FILE = path.join(process.cwd(), 'errors.jsonl');
 
+// ── PIN Admin (almacenado sólo en backend, nunca expuesto) ──
+// Hash simple: btoa de la cadena invertida + salt fijo
+const ADMIN_PIN_HASH = 'NzEyMl9wbGFzdGl0ZWM='; // btoa('2217' reverse + '_plastitec') -> btoa('7122_plastitec')
+const verifyPin = (input) => {
+    try {
+        const reversed = [...String(input)].reverse().join('');
+        return btoa(`${reversed}_plastitec`) === ADMIN_PIN_HASH;
+    } catch (e) { return false; }
+};
+
 // Auth error pattern used in the query retry logic
 // Defined at module level to ensure availability in all closures
 const AUTH_ERROR_RE = /\b(Authentication expired|re-authenticate|session expired|login required|401)\b/i;
@@ -299,15 +309,28 @@ async function initializeMCP() {
     }
 }
 
-/**
- * Health check endpoint
- */
 app.get('/api/health', (req, res) => {
     res.json({
         status: isInitialized ? 'ready' : 'initializing',
         notebookId: notebookId,
         timestamp: new Date().toISOString()
     });
+});
+
+/**
+ * Verify Admin PIN
+ */
+app.post('/api/verify-pin', (req, res) => {
+    const { pin } = req.body;
+    if (!pin) return res.status(400).json({ success: false, error: 'PIN requerido' });
+
+    if (verifyPin(pin)) {
+        console.log('🔓 [Security] PIN verificado con éxito');
+        res.json({ success: true });
+    } else {
+        console.warn('🔒 [Security] Intento de acceso fallido con PIN:', pin);
+        res.json({ success: false, error: 'PIN incorrecto' });
+    }
 });
 
 /**

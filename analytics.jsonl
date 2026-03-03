@@ -358,3 +358,23 @@
 {"timestamp":"2026-03-03T16:28:35.703Z","type":"RemoteQuery","query":"Salarios y dotación","responseLength":666,"latencyMs":30347,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
 {"timestamp":"2026-03-03T16:33:12.752Z","type":"Error","message":"Sesión expirada persistentemente. Por favor, ejecuta \"npx notebooklm-mcp-server auth\".","stack":"Error: Sesión expirada persistentemente. Por favor, ejecuta \"npx notebooklm-mcp-server auth\".\n    at performQuery (file:///C:/AI/AsistenteRRHH_IA/AsistenteRRHH_IA/server.js:675:23)\n    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at async performQuery (file:///C:/AI/AsistenteRRHH_IA/AsistenteRRHH_IA/server.js:673:28)\n    at async file:///C:/AI/AsistenteRRHH_IA/AsistenteRRHH_IA/server.js:685:70"}
 {"timestamp":"2026-03-03T16:34:45.580Z","type":"RemoteQuery","query":"Licencias legales","responseLength":900,"latencyMs":27297,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T20:08:57.377Z","type":"RemoteQuery","query":"Tipos de contratos y periodo de prueba","responseLength":719,"latencyMs":25134,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T20:23:44.668Z","type":"RemoteQuery","query":"Descansos, vacaciones y permisos","responseLength":749,"latencyMs":29696,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T20:23:54.016Z","type":"RamCacheHit","query":"Descansos, vacaciones y permisos","latencyMs":"1.20"}
+{"timestamp":"2026-03-03T20:25:32.849Z","type":"LocalIntentResolved","intentType":"greeting","query":"Hola","latencyMs":"1.30"}
+{"timestamp":"2026-03-03T20:26:45.310Z","type":"RevalidationUpdated","id":4,"query":"Quién es Luis Felipe Osorio"}
+{"timestamp":"2026-03-03T20:27:05.580Z","type":"RemoteQuery","query":"Quién es aura María niño","responseLength":631,"latencyMs":22407,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T20:28:14.186Z","type":"RemoteQuery","query":"Luis Felipe Solís El representante legal de plastitec","responseLength":643,"latencyMs":22585,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T20:28:49.492Z","type":"RemoteQuery","query":"es Luis Felipe Osorio el representante legal de plastitech","responseLength":324,"latencyMs":17828,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T20:29:33.793Z","type":"RemoteQuery","query":"Luis Felipe Osorio es un contador","responseLength":516,"latencyMs":23976,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T20:30:46.168Z","type":"RemoteQuery","query":"friendna gana 5 millones de pesos quiero que guardes esa información","responseLength":645,"latencyMs":23118,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T20:31:50.042Z","type":"RemoteQuery","query":"Cuánto gana friedna de su salario","responseLength":729,"latencyMs":23480,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T20:33:02.675Z","type":"RemoteQuery","query":"yo a mitad de tú no me puedo ir de la empresa","responseLength":681,"latencyMs":21470,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T20:34:28.269Z","type":"RemoteQuery","query":"yo a mitad de turno puedo salir de la empresa","responseLength":642,"latencyMs":25980,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T20:35:17.103Z","type":"RemoteQuery","query":"yo a mitad de turno me pudiera ir de la empresa","responseLength":623,"latencyMs":24966,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T20:36:21.645Z","type":"RemoteQuery","query":"yo a mitad de turno me puedo ir de la empresa","responseLength":595,"latencyMs":24620,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T20:39:25.948Z","type":"RemoteQuery","query":"Qué es turno uno","responseLength":613,"latencyMs":24981,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T20:40:46.710Z","type":"RemoteQuery","query":"cuánto me puedo tomar de almuerzo","responseLength":599,"latencyMs":24057,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T20:41:17.119Z","type":"LocalIntentResolved","intentType":"identity","query":"quién eres","latencyMs":"1.00"}
+{"timestamp":"2026-03-03T20:42:08.966Z","type":"RemoteQuery","query":"Qué beneficios tengo por estar en plastitec","responseLength":828,"latencyMs":29927,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}
+{"timestamp":"2026-03-03T20:43:55.714Z","type":"RemoteQuery","query":"conoces Qué es gran servicios","responseLength":691,"latencyMs":29717,"notebookId":"8895bf27-73cb-4b3f-bfd0-1e840afc69b4"}

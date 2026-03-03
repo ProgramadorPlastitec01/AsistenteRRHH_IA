@@ -20,6 +20,7 @@ const VoiceChat = () => {
     // Analytics & Debug
     const [showAnalytics, setShowAnalytics] = useState(false);
     const [performanceMetrics, setPerformanceMetrics] = useState(null);
+    const [showPinModal, setShowPinModal] = useState(false);
     const secretClickRef = useRef(0);
 
     const handleSecretClick = (e) => {
@@ -30,14 +31,13 @@ const VoiceChat = () => {
         if (navigator.vibrate) navigator.vibrate(20);
 
         if (secretClickRef.current >= 5) {
-            // Opening in a new window/tab as requested
-            window.open('/?dashboard=true', '_blank');
+            setShowPinModal(true);
             secretClickRef.current = 0;
             const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2568/2568-preview.mp3');
             audio.play().catch(() => { });
         }
 
-        // Clear counter if not finished in 2 seconds
+        // Clear counter if not finished in 2.5 seconds
         if (secretClickRef.current === 1) {
             setTimeout(() => { secretClickRef.current = 0; }, 2500);
         }
@@ -852,6 +852,79 @@ const VoiceChat = () => {
                                     })}
                                 </div>
                             </div>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* Administrador PIN Modal */}
+            <AnimatePresence>
+                {showPinModal && (
+                    <motion.div
+                        initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                        className="fixed inset-0 z-[300] flex items-center justify-center p-6 bg-black/80 backdrop-blur-2xl"
+                        onClick={() => setShowPinModal(false)}
+                    >
+                        <motion.div
+                            initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }}
+                            className="bg-[#1a2333] border border-white/10 rounded-[2.5rem] p-10 max-w-md w-full shadow-4xl text-center"
+                            onClick={e => e.stopPropagation()}
+                        >
+                            <div className="mb-8">
+                                <div className="w-20 h-20 bg-blue-500/20 rounded-full flex items-center justify-center text-3xl mx-auto mb-4 border border-blue-500/30">
+                                    🔐
+                                </div>
+                                <h2 className="text-2xl font-bold text-white">Acceso Restringido</h2>
+                                <p className="text-white/40 mt-2">Ingresa el PIN para acceder al Dashboard Admin</p>
+                            </div>
+
+                            <form onSubmit={async (e) => {
+                                e.preventDefault();
+                                const pinInput = e.target.pin.value;
+                                try {
+                                    const res = await fetch(`${API_BASE_URL}/api/verify-pin`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ pin: pinInput })
+                                    });
+                                    const data = await res.json();
+                                    if (data.success) {
+                                        window.open('/?dashboard=true', '_blank');
+                                        setShowPinModal(false);
+                                    } else {
+                                        alert('PIN Incorrecto. Intenta de nuevo.');
+                                        e.target.pin.value = '';
+                                    }
+                                } catch (err) {
+                                    console.error('Error verificando PIN:', err);
+                                    alert('Error de conexión con el servidor.');
+                                }
+                            }}>
+                                <input
+                                    name="pin"
+                                    type="password"
+                                    autoFocus
+                                    inputMode="numeric"
+                                    maxLength={4}
+                                    placeholder="••••"
+                                    className="w-full bg-black/40 border border-white/10 rounded-2xl py-6 text-4xl text-center tracking-[1em] text-blue-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all mb-6 placeholder:text-white/5"
+                                />
+                                <div className="grid grid-cols-2 gap-4">
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowPinModal(false)}
+                                        className="py-4 bg-white/5 hover:bg-white/10 rounded-xl text-white/60 font-medium transition-all"
+                                    >
+                                        Cancelar
+                                    </button>
+                                    <button
+                                        type="submit"
+                                        className="py-4 bg-blue-600 hover:bg-blue-500 rounded-xl text-white font-bold transition-all shadow-lg shadow-blue-600/20"
+                                    >
+                                        Validar
+                                    </button>
+                                </div>
+                            </form>
                         </motion.div>
                     </motion.div>
                 )}

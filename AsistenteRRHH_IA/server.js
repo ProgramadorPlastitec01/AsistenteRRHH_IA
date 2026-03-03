@@ -20,6 +20,17 @@ import os from 'os';
 import fs from 'fs';
 import path from 'path';
 import multer from 'multer';
+import { createRequire } from 'module';
+
+// SQLite — importado con require() para compatibilidad ESM
+const require = createRequire(import.meta.url);
+let sqlite3Pkg, sqliteOpen;
+try {
+    sqlite3Pkg = require('sqlite3').verbose();
+    sqliteOpen = require('sqlite').open;
+} catch (e) {
+    console.warn('⚠️ sqlite/sqlite3 no disponible. SQLite FAQ desactivado.');
+}
 
 // Multer is not longer needed as Whisper was removed
 // const upload = multer({ ... });
@@ -28,6 +39,204 @@ const app = express();
 const PORT = 3000;
 const LOG_FILE = path.join(process.cwd(), 'analytics.jsonl');
 const ERRORS_FILE = path.join(process.cwd(), 'errors.jsonl');
+const DB_PATH = path.join(process.cwd(), 'hr_cache.db');
+
+// ── PIN Admin (almacenado sólo en backend, nunca expuesto) ──
+// Hash simple: btoa de la cadena invertida + salt fijo
+const ADMIN_PIN_HASH = btoa('7122_plastitec'); // PIN 2217 invertido + salt
+const verifyPin = (input) => btoa(`${[...String(input)].reverse().join('')}_plastitec`) === ADMIN_PIN_HASH;
+
+// ── DatabaseService — FAQ Progresivo ──
+const DatabaseService = {
+    db: null,
+
+    async init() {
+        if (!sqliteOpen || !sqlite3Pkg) { console.warn('SQLite no disponible.'); return; }
+        try {
+            this.db = await sqliteOpen({ filename: DB_PATH, driver: sqlite3Pkg.Database });
+            await this.db.exec(`PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;`);
+
+            await this.db.exec(`
+                CREATE TABLE IF NOT EXISTS knowledge_base (
+                    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                    question_original    TEXT    NOT NULL,
+                    question_normalized  TEXT    NOT NULL UNIQUE,
+                    answer               TEXT    NOT NULL,
+                    category             TEXT    DEFAULT 'general',
+                    source               TEXT    DEFAULT 'notebooklm',
+                    usage_count          INTEGER DEFAULT 1,
+                    faq_validated        INTEGER DEFAULT 0,
+                    priority_level       TEXT    DEFAULT 'normal',
+                    first_asked_date     DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    last_asked_date      DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    last_validated       DATETIME DEFAULT NULL,
+                    knowledge_version    INTEGER DEFAULT 0,
+                    created_at           DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            `);
+
+            // Migración segura para BD existente
+            const cols = (await this.db.all(`PRAGMA table_info(knowledge_base)`)).map(c => c.name);
+            const migrations = [
+                ['faq_validated', `ALTER TABLE knowledge_base ADD COLUMN faq_validated INTEGER DEFAULT 0`],
+                ['priority_level', `ALTER TABLE knowledge_base ADD COLUMN priority_level TEXT DEFAULT 'normal'`],
+                ['first_asked_date', `ALTER TABLE knowledge_base ADD COLUMN first_asked_date DATETIME DEFAULT NULL`],
+                ['last_asked_date', `ALTER TABLE knowledge_base ADD COLUMN last_asked_date DATETIME DEFAULT NULL`],
+                ['knowledge_version', `ALTER TABLE knowledge_base ADD COLUMN knowledge_version INTEGER DEFAULT 0`],
+                ['last_validated', `ALTER TABLE knowledge_base ADD COLUMN last_validated DATETIME DEFAULT NULL`],
+                ['source', `ALTER TABLE knowledge_base ADD COLUMN source TEXT DEFAULT 'notebooklm'`],
+            ];
+            for (const [col, sql] of migrations) {
+                if (!cols.includes(col)) {
+                    await this.db.exec(sql);
+                    console.log(`🔧 [DB] Columna '${col}' agregada`);
+                }
+            }
+
+            await this.db.exec(`CREATE INDEX IF NOT EXISTS idx_faq ON knowledge_base(faq_validated, usage_count)`);
+            await this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_qnorm ON knowledge_base(question_normalized)`);
+
+            console.log(`✅ SQLite FAQ Database inicializada: ${DB_PATH}`);
+        } catch (e) {
+            console.error('❌ Error SQLite init:', e.message);
+        }
+    },
+
+    normalize(text) {
+        return text.toLowerCase()
+            .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+            .replace(/[.,?¿!¡]/g, '').replace(/\s+/g, ' ').trim();
+    },
+
+    isNegative(answer) {
+        const markers = ['no se encontró', 'no existe información', 'no tengo información',
+            'no se menciona', 'no hay información', 'no está documentado', 'no figura',
+            'no contempla', 'el rit no menciona'];
+        const lower = (answer || '').toLowerCase();
+        return markers.some(m => lower.includes(m));
+    },
+
+    async findSimilar(question) {
+        if (!this.db) return null;
+        const norm = this.normalize(question);
+        const row = await this.db.get(
+            `SELECT * FROM knowledge_base WHERE question_normalized = ? LIMIT 1`, [norm]
+        );
+        if (row) {
+            this.incrementUsage(row.id).catch(() => { });
+            return row;
+        }
+        return null;
+    },
+
+    async storeOrUpdate(questionOriginal, answer, category = 'general', source = 'notebooklm', forceUpdate = false) {
+        if (!this.db || !questionOriginal || !answer || answer.length < 10) return 'skipped';
+        const norm = this.normalize(questionOriginal);
+        try {
+            const existing = await this.db.get(`SELECT id, answer, knowledge_version FROM knowledge_base WHERE question_normalized = ?`, [norm]);
+
+            if (!existing) {
+                await this.db.run(
+                    `INSERT INTO knowledge_base 
+                     (question_original, question_normalized, answer, category, source, first_asked_date, last_asked_date, last_validated, knowledge_version)
+                     VALUES (?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP, 1)`,
+                    [questionOriginal, norm, answer, category, source]
+                );
+                return 'inserted';
+            }
+
+            if (forceUpdate) {
+                const newVersion = (existing.knowledge_version || 0) + 1;
+                await this.db.run(
+                    `UPDATE knowledge_base SET 
+                     answer = ?, 
+                     last_asked_date = CURRENT_TIMESTAMP, 
+                     last_validated = CURRENT_TIMESTAMP,
+                     knowledge_version = ?
+                     WHERE id = ?`,
+                    [answer, newVersion, existing.id]
+                );
+                return 'updated_version';
+            }
+
+            // Solo actualizar timestamp de validación si no hay cambios
+            await this.db.run(
+                `UPDATE knowledge_base SET 
+                 usage_count = usage_count + 1, 
+                 last_asked_date = CURRENT_TIMESTAMP,
+                 last_validated = CURRENT_TIMESTAMP 
+                 WHERE id = ?`, [existing.id]
+            );
+            this.checkAndPromoteFAQ(existing.id).catch(() => { });
+            return 'validated';
+        } catch (e) {
+            console.error('[SQLite] storeOrUpdate error:', e.message);
+            return 'skipped';
+        }
+    },
+
+    async incrementUsage(id) {
+        if (!this.db) return;
+        await this.db.run(
+            `UPDATE knowledge_base SET usage_count=usage_count+1, last_asked_date=CURRENT_TIMESTAMP WHERE id=?`, [id]
+        );
+        this.checkAndPromoteFAQ(id).catch(() => { });
+    },
+
+    async checkAndPromoteFAQ(id) {
+        if (!this.db) return;
+        const row = await this.db.get(
+            `SELECT id,usage_count,first_asked_date,faq_validated FROM knowledge_base WHERE id=?`, [id]
+        );
+        if (!row || row.faq_validated) return;
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+        const inWindow = !row.first_asked_date || row.first_asked_date >= sevenDaysAgo;
+        if (row.usage_count >= 10 && inWindow) {
+            await this.db.run(
+                `UPDATE knowledge_base SET faq_validated=1, priority_level='alta' WHERE id=?`, [id]
+            );
+            console.log(`⭐ [FAQ] id:${id} promovida a FAQ validada (uso=${row.usage_count})`);
+        }
+    },
+
+    async getFAQValidated(limit = 5) {
+        if (!this.db) return [];
+        return this.db.all(
+            `SELECT id,question_original,usage_count,priority_level,last_asked_date
+             FROM knowledge_base WHERE faq_validated=1
+             ORDER BY usage_count DESC, last_asked_date DESC LIMIT ?`, [limit]
+        );
+    },
+
+    async getLearningStats() {
+        if (!this.db) return { total: 0, faqValidated: 0, lowFrequency: 0, pendingRevalidation: 0 };
+        const [tot, faq, low, stale] = await Promise.all([
+            this.db.get(`SELECT COUNT(*) as n FROM knowledge_base`),
+            this.db.get(`SELECT COUNT(*) as n FROM knowledge_base WHERE faq_validated=1`),
+            this.db.get(`SELECT COUNT(*) as n FROM knowledge_base WHERE usage_count < 3`),
+            this.db.get(`SELECT COUNT(*) as n FROM knowledge_base WHERE knowledge_version < 1 OR knowledge_version IS NULL`)
+        ]);
+        return { total: tot?.n || 0, faqValidated: faq?.n || 0, lowFrequency: low?.n || 0, pendingRevalidation: stale?.n || 0 };
+    },
+
+    async getLearningRecords(limit = 50) {
+        if (!this.db) return [];
+        return this.db.all(
+            `SELECT id,question_original,usage_count,faq_validated,priority_level,
+                    knowledge_version,last_validated,last_asked_date
+             FROM knowledge_base ORDER BY usage_count DESC, faq_validated DESC LIMIT ?`, [limit]
+        );
+    },
+
+    async forceRevalidate(id) {
+        if (!this.db) return false;
+        await this.db.run(
+            `UPDATE knowledge_base SET knowledge_version=0, last_validated=NULL WHERE id=?`, [id]
+        );
+        return true;
+    }
+};
+
 
 /**
  * Helper to log analytics events to JSONL file
@@ -411,35 +620,14 @@ app.post('/api/query', async (req, res) => {
         const start = Date.now();
 
         if (!query || typeof query !== 'string') {
-            return res.status(400).json({
-                error: 'Query is required and must be a string'
-            });
+            return res.status(400).json({ error: 'Query is required and must be a string' });
         }
 
         if (!isInitialized) {
-            return res.status(503).json({
-                error: 'El servicio aún se está inicializando. Por favor intenta de nuevo en unos momentos.'
-            });
+            return res.status(503).json({ error: 'El servicio aún se está inicializando.' });
         }
 
-        console.log(`Processing query: "${query}"`);
-
-        // FALLBACK: If in Demo Mode, return simulated responses
-        if (notebookId === 'DEMO_MODE') {
-            const lowerQuery = query.toLowerCase();
-            let simulatedResponse = 'Lo siento, no encuentro esa información en mi base de conocimientos actual. Por favor, contacta con RRHH.';
-
-            if (lowerQuery.includes('vacaciones')) simulatedResponse = 'Tienes derecho a 22 días de vacaciones. Regístralas en el portal de empleados.';
-            if (lowerQuery.includes('pago') || lowerQuery.includes('nómina')) simulatedResponse = 'La nómina se paga el último viernes de cada mes.';
-            if (lowerQuery.includes('horario')) simulatedResponse = 'El horario es de 9:00 a 18:00, de lunes a viernes.';
-
-            return res.json({
-                response: simulatedResponse, // Clean response for demo
-                outOfScope: false
-            });
-        }
-
-        // B1 FIX/REFINEMENT: Apply strict constraints to force direct, grounded responses.
+        // Configuración de Prompt y Errores
         const enhancedQuery = `--------------------------------------------------
 INSTRUCCIONES CRÍTICAS PARA LA IA
 --------------------------------------------------
@@ -452,24 +640,32 @@ INSTRUCCIONES CRÍTICAS PARA LA IA
 7. No amplíes la respuesta con contexto innecesario.
 8. Si la información no existe en NotebookLM, responde exactamente:
    "No se encontró información relacionada en los documentos disponibles."
-
+ 
 FORMATO DE RESPUESTA OBLIGATORIO:
 - Un único bloque de respuesta.
 - Máximo 1–2 párrafos.
 - Lenguaje claro y profesional.
-- Sin introducciones como "Según la información proporcionada...", "De acuerdo con los documentos...", etc.
 --------------------------------------------------
-
 CONSULTA: ${query}`;
 
-        // Auth error pattern — B2 FIX: precise regex to avoid false positives on words like
-        // "autorización" or "autenticación de empleados" that would trigger a useless retry.
         const AUTH_ERROR_RE = /\b(Authentication expired|re-authenticate|session expired|login required|401)\b/i;
 
+        // ── MOTOR HÍBRIDO: Lógica de Aprendizaje Progresivo ──
+
+        // 1. Buscar en SQLite (Caché inteligente / Fallback)
+        let localRecord = null;
+        try {
+            localRecord = await DatabaseService.findSimilar(query);
+            if (localRecord) {
+                console.log(`🔍 [SQLite] Registro encontrado (id:${localRecord.id}, faq:${!!localRecord.faq_validated})`);
+            }
+        } catch (e) {
+            console.warn('⚠️ Error consultando local KB:', e.message);
+        }
+
+        // 2. Definir función de consulta a NotebookLM
         const performQuery = async (retryCount = 0) => {
             const mcpStart = Date.now();
-            console.log(`[Query] MCP call started at +${mcpStart - start}ms`);
-
             const result = await mcpClient.callTool({
                 name: 'notebook_query',
                 arguments: {
@@ -479,69 +675,86 @@ CONSULTA: ${query}`;
                 }
             });
 
-            const mcpLatency = Date.now() - mcpStart;
-            console.log(`[Query] MCP responded in ${mcpLatency}ms | Total so far: ${Date.now() - start}ms`);
-
             const rawText = result.content[0].text;
-
-            // B2: only retry on genuine auth errors, not every occurrence of the substring
-            if (AUTH_ERROR_RE.test(rawText)) {
-                if (retryCount === 0) {
-                    console.log('💡 Auth error detected in content. Attempting refresh and retry...');
-                    await mcpClient.callTool({ name: 'refresh_auth', arguments: {} });
-                    return await performQuery(1);
-                }
-                throw new Error('Sesión expirada persistentemente. Por favor, ejecuta "npx notebooklm-mcp-server auth".');
+            if (AUTH_ERROR_RE.test(rawText) && retryCount === 0) {
+                await mcpClient.callTool({ name: 'refresh_auth', arguments: {} });
+                return await performQuery(1);
             }
 
             return {
-                text: rawText,
+                text: rawText.replace(/\[\d+\]/g, '').trim(),
                 conversationId: result.conversationId
             };
         };
 
-        const { text: rawText, conversationId: finalConversationId } = await performQuery();
-        const backendTotal = Date.now() - start;
-        console.log(`[Query] ✅ Complete. Backend total: ${backendTotal}ms`);
+        // 3. Ejecutar consulta remota con Fallback Resiliente
+        let remoteText = null;
+        let finalConversationId = conversationId;
 
-        let responseText = rawText;
-        let finalId = finalConversationId;
-
-        // Intentar parsear si el resultado es un JSON string
         try {
-            const parsed = JSON.parse(rawText);
-            if (parsed.answer) responseText = parsed.answer;
-            if (parsed.conversation_id) finalId = parsed.conversation_id;
-        } catch (e) { }
+            const remoteResult = await performQuery();
+            remoteText = remoteResult.text;
+            finalConversationId = remoteResult.conversationId;
+        } catch (error) {
+            console.error('❌ [NotebookLM] Error:', error.message);
 
-        // Limpieza básica (eliminando referencias estilo [1], [2])
-        responseText = responseText
-            .replace(/\[\d+\]/g, '')
-            .trim();
-
-        // Check if out of scope or not found
-        const isNotFound = responseText.includes("No se encontró información relacionada en los documentos disponibles");
-
-        if (isNotFound) {
-            return res.json({
-                response: responseText,
-                outOfScope: true,
-                conversationId: finalId
-            });
+            // CASO C: Si NotebookLM falla, usar respuesta SQLite si existe
+            if (localRecord && localRecord.answer) {
+                console.log('🛡️ [Fallback] Usando respuesta de SQLite debido a fallo en NotebookLM');
+                return res.json({
+                    response: localRecord.answer,
+                    outOfScope: false,
+                    conversationId: conversationId,
+                    source: 'sqlite_fallback'
+                });
+            }
+            throw error; // Re-lanzar si no hay fallback
         }
 
-        // Log successful remote query
-        logAnalyticsEvent('RemoteQuery', {
+        // 4. Lógica de Comparación y Aprendizaje (Asíncrona, no bloquea UI)
+        const processLearning = async () => {
+            if (!remoteText || remoteText.includes("No se encontró información")) return;
+
+            const isNotFound = remoteText.includes("No se encontró información relacionada");
+            if (isNotFound) return;
+
+            if (!localRecord) {
+                // CASO A: Nuevo conocimiento
+                await DatabaseService.storeOrUpdate(query, remoteText);
+                console.log('🆕 [Learning] Nueva respuesta almacenada en SQLite');
+            } else {
+                // CASO B: Registro existente -> Comparar
+                const normRemote = DatabaseService.normalize(remoteText);
+                const normLocal = DatabaseService.normalize(localRecord.answer);
+
+                // Si son significativamente diferentes, actualizar versión
+                if (normRemote !== normLocal) {
+                    console.log('🔄 [Learning] Respuesta actualizada (Cambio detectado)');
+                    await DatabaseService.storeOrUpdate(query, remoteText, 'general', 'notebooklm', true);
+                } else {
+                    // Si son similares, solo validar
+                    console.log('✅ [Learning] Respuesta local validada contra NotebookLM');
+                    await DatabaseService.storeOrUpdate(query, remoteText);
+                }
+            }
+        };
+
+        // Ejecutar aprendizaje en segundo plano
+        processLearning().catch(err => console.error('Error en proceso de aprendizaje:', err));
+
+        // 5. Devolver respuesta fresca de NotebookLM
+        logAnalyticsEvent('HybridQuery', {
             query,
-            responseLength: responseText.length,
+            hadLocal: !!localRecord,
             latencyMs: Date.now() - start,
             notebookId
         });
 
         res.json({
-            response: responseText,
+            response: remoteText,
             outOfScope: false,
-            conversationId: finalId
+            conversationId: finalConversationId,
+            source: 'hybrid_remote'
         });
 
     } catch (error) {
@@ -614,6 +827,77 @@ app.get('/api/notebook', async (req, res) => {
 });
 
 /**
+ * ── FAQ & Learning Endpoints ────────────────────────────────
+ */
+
+/** Top-5 FAQs validadas (para vista principal) */
+app.get('/api/faq', async (req, res) => {
+    try {
+        const faqs = await DatabaseService.getFAQValidated(5);
+        res.json({ faqs });
+    } catch (e) {
+        res.json({ faqs: [] });
+    }
+});
+
+/** Métricas del sistema de aprendizaje */
+app.get('/api/learning-stats', async (req, res) => {
+    try {
+        const stats = await DatabaseService.getLearningStats();
+        res.json(stats);
+    } catch (e) {
+        res.json({ total: 0, faqValidated: 0, lowFrequency: 0, pendingRevalidation: 0 });
+    }
+});
+
+/** Todos los registros para el panel admin */
+app.get('/api/learning-records', async (req, res) => {
+    try {
+        const records = await DatabaseService.getLearningRecords(100);
+        res.json({ records });
+    } catch (e) {
+        res.json({ records: [] });
+    }
+});
+
+/** Forzar revalidación de un registro por ID */
+app.post('/api/force-revalidate/:id', async (req, res) => {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'ID inválido' });
+    try {
+        await DatabaseService.forceRevalidate(id);
+        res.json({ success: true, message: `Registro id:${id} marcado para revalidación` });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+/** Verificación PIN del Admin Dashboard (PIN nunca expuesto en frontend) */
+app.post('/api/verify-pin', (req, res) => {
+    const { pin } = req.body;
+    if (!pin) return res.status(400).json({ error: 'PIN requerido' });
+    const valid = verifyPin(String(pin).trim());
+    if (valid) {
+        res.json({ success: true });
+    } else {
+        // Delay artificial para prevenir brute-force
+        setTimeout(() => res.json({ success: false, error: 'PIN incorrecto' }), 800);
+    }
+});
+
+/** Guardar respuesta en FAQ local (llamado por el query handler) */
+app.post('/api/store-faq', async (req, res) => {
+    const { question, answer, category } = req.body;
+    if (!question || !answer) return res.status(400).json({ error: 'Faltan datos' });
+    try {
+        const result = await DatabaseService.storeOrUpdate(question, answer, category || 'general');
+        res.json({ success: true, result });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+/**
  * Error handling middleware
  */
 app.use((err, req, res, next) => {
@@ -656,6 +940,9 @@ app.use((err, req, res, next) => {
  */
 async function startServer() {
     try {
+        // Inicializar SQLite FAQ Database
+        await DatabaseService.init();
+
         // Initialize MCP connection first
         await initializeMCP();
 
