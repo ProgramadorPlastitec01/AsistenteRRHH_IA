@@ -24,7 +24,7 @@ import path from 'path';
 
 // --- NUEVOS SERVICIOS DE CACHÉ Y PRIVACIDAD ---
 import DatabaseService from './services/database.js';
-import PrivacyService from './services/privacy.js';
+import PrivacyService, { CATEGORIES } from './services/privacy.js';
 import multer from 'multer';
 
 // Multer is not longer needed as Whisper was removed
@@ -184,21 +184,28 @@ async function revalidateInBackground(query, cachedRow) {
 
         // Reutilizar el mismo prompt del query handler
         const revalQuery = `### ASISTENTE CORPORATIVO DE RECURSOS HUMANOS - PLASTITEC ###
-Respuesta basada solamente en el Reglamento Interno de Trabajo (RIT) y políticas oficiales.
+Respuesta basada solamente en el Reglamento Interno de Trabajo (RIT).
 
-### PRIORIDAD DE INTENCIÓN (OBLIGATORIA) ###
-1. SI EL MENSAJE ES SOLO CONVERSACIONAL (Hola, gracias, etc.): Responde de forma breve y profesional.
-2. SI EL MENSAJE CONTIENE UNA CONSULTA REAL (aunque incluya saludo/gracias): IGNORA el saludo/gracias y responde ÚNICAMENTE a la consulta sobre el reglamento.
+### CLASIFICACIÓN OBLIGATORIA (JSON) ###
+Debes clasificar la consulta en una de estas categorías:
+1. reglamento: Temas laborales del RIT.
+2. confidencial: Salarios, pagos o datos personales.
+3. fuera_de_dominio: Temas no relacionados con el RIT.
+4. casual: Saludos o cortesía sin consulta.
+5. maliciosa: Entradas sospechosas o sin sentido.
 
-### CLASIFICACIÓN DE CATEGORÍA ###
-1. INFORMACIÓN CONFIDENCIAL PERSONAL O SALARIAL (Bloqueo).
-2. CONSULTA GENERAL DEL REGLAMENTO (Permisos, sanciones, horarios, derechos).
-3. PREGUNTA FUERA DE DOMINIO.
+### FORMATO DE RESPUESTA (OBLIGATORIO) ###
+Responde ÚNICAMENTE con un objeto JSON válido:
+{
+  "classification": "categoría_aquí",
+  "answer": "tu_respuesta_aquí"
+}
 
-### REGLAS DE RESPUESTA ###
-- CATEGORÍA 1: "No puedo proporcionar información confidencial sobre salarios o datos personales. Para conocer tu información exacta, consulta directamente con RRHH."
-- CATEGORÍA 2: Responde directo, máximo 3-4 líneas, lenguaje claro y humano.
-- CATEGORÍA 3: Indica brevemente que el tema no está contemplado en el RIT.
+### REGLAS DE RESPUESTA (PRIORIDAD ABSOLUTA) ###
+- REGLA INQUEBRANTABLE: SI EL MENSAJE CONTIENE UNA CONSULTA LABORAL, IGNORA COMPLETAMENTE EL SALUDO/GRACIAS. RESPONDE ÚNICAMENTE LA CONSULTA.
+- SOLO responda con saludo/cortesía si el mensaje es EXACTAMENTE una expresión conversacional aislada (ej: "Hola" o "Gracias").
+- CATEGORÍA "reglamento": Respuesta directa, 3-4 líneas, tono humano y profesional.
+- CATEGORÍA "confidencial": "No puedo proporcionar información confidencial sobre salarios o datos personales. Para conocer tu información exacta, consulta directamente con RRHH."
 
 Consulta: ${query}`;
 
@@ -208,7 +215,24 @@ Consulta: ${query}`;
         });
 
         // Aplicamos limpieza profunda antes de guardar en SQLite
+        let aiClassification = null;
+        try {
+            const jsonMatch = result.content[0].text.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                const parsed = JSON.parse(jsonMatch[0]);
+                aiClassification = parsed.classification;
+            }
+        } catch (e) { }
+
+        const finalCategory = PrivacyService.classify(query, aiClassification);
         const newAnswer = cleanResponse(result.content[0].text);
+
+        // --- REGLA CRÍTICA: Si ya no es RIT, eliminar de la base ---
+        if (finalCategory !== CATEGORIES.REGLAMENTO) {
+            console.warn(`🗑️ [Revalidation] Registro id:${cachedRow.id} ya no pertenece al RIT (Categoría: ${finalCategory}). ELIMINANDO...`);
+            await DatabaseService.delete(cachedRow.id);
+            return;
+        }
 
         if (DatabaseService.hasSignificantChange(cachedRow.answer, newAnswer)) {
             await DatabaseService.markRevalidated(cachedRow.id, newAnswer, knowledgeVersion);
@@ -633,7 +657,7 @@ app.post('/api/query', async (req, res) => {
 
         // --- FILTRO DE PRIVACIDAD PREVENTIVO (ORDEN DE PRIORIDAD OBLIGATORIO) ---
         // Se evalúa ANTES de consultar el reglamento o la caché.
-        if (PrivacyService.classify(query) === 'sensitive') {
+        if (PrivacyService.classify(query) === CATEGORIES.CONFIDENCIAL) {
             console.log('🛡️ [Privacy Guard] Bloqueo preventivo: Pregunta detectada como sensible.');
             return res.json({
                 response: "No puedo proporcionar información confidencial sobre salarios o datos personales.\nPara conocer tu información exacta, consulta directamente con RRHH.",
@@ -642,39 +666,46 @@ app.post('/api/query', async (req, res) => {
             });
         }
 
-        // --- PASO 1: Búsqueda en Caché Local (SQLite — fuente de verdad persistente) ---
-        try {
-            const cachedResult = await DatabaseService.findSimilar(query);
-            if (cachedResult) {
-                const cacheType = cachedResult.question_normalized === DatabaseService.normalize(query)
-                    ? 'exacta'
-                    : 'similar';
+        // --- PASO 0: Clasificación LOCAL PREVIA ---
+        const localCategory = PrivacyService.classify(query);
 
-                // Verificar si necesita revalidación en background
-                const shouldRevalidate = DatabaseService.needsRevalidation(cachedResult, knowledgeVersion);
-                if (shouldRevalidate && mcpClient && notebookId !== 'DEMO_MODE') {
-                    console.log(`🔄 [Revalidation] Revalidación pendiente para id:${cachedResult.id} — ejecutando en background...`);
-                    // setImmediate: responde primero, revalida después. No bloquea UI.
-                    setImmediate(() => revalidateInBackground(query, cachedResult));
+        // --- PASO 1: Búsqueda en Caché Local (SOLO si es del RIT) ---
+        if (localCategory === CATEGORIES.REGLAMENTO) {
+            try {
+                const cachedResult = await DatabaseService.findSimilar(query);
+                if (cachedResult) {
+                    const cacheType = cachedResult.question_normalized === DatabaseService.normalize(query)
+                        ? 'exacta'
+                        : 'similar';
+
+                    // Verificar si necesita revalidación en background
+                    const shouldRevalidate = DatabaseService.needsRevalidation(cachedResult, knowledgeVersion);
+                    if (shouldRevalidate && mcpClient && notebookId !== 'DEMO_MODE') {
+                        console.log(`🔄 [Revalidation] Revalidación pendiente para id:${cachedResult.id} — ejecutando en background...`);
+                        setImmediate(() => revalidateInBackground(query, cachedResult));
+                    }
+
+                    // AHORA: incrementUsage es manual tras confirmar que sigue siendo reglamento
+                    await DatabaseService.incrementUsage(cachedResult.id);
+
+                    console.log(`🚀 [SQLite Cache Hit] Coincidencia ${cacheType} — uso #${cachedResult.usage_count + 1}${shouldRevalidate ? ' (revalidando en BG)' : ''}`);
+
+                    const cleanCachedAnswer = cleanResponse(cachedResult.answer);
+
+                    return res.json({
+                        response: cleanCachedAnswer,
+                        outOfScope: false,
+                        cached: true,
+                        cacheSource: 'sqlite',
+                        revalidating: shouldRevalidate,
+                        conversationId: conversationId || 'cached-session'
+                    });
                 }
-
-                console.log(`🚀 [SQLite Cache Hit] Coincidencia ${cacheType} — uso #${cachedResult.usage_count + 1}${shouldRevalidate ? ' (revalidando en BG)' : ''}`);
-
-                // IMPORTANTE: Limpiamos la respuesta de la caché antes de enviarla, 
-                // por si se guardó con JSON o ruido en versiones anteriores.
-                const cleanCachedAnswer = cleanResponse(cachedResult.answer);
-
-                return res.json({
-                    response: cleanCachedAnswer,
-                    outOfScope: false,
-                    cached: true,
-                    cacheSource: 'sqlite',
-                    revalidating: shouldRevalidate,
-                    conversationId: conversationId || 'cached-session'
-                });
+            } catch (cacheError) {
+                console.error('⚠️ Error al buscar en caché SQLite:', cacheError.message);
             }
-        } catch (cacheError) {
-            console.error('⚠️ Error al buscar en caché SQLite:', cacheError.message);
+        } else {
+            console.log(`ℹ️ [Query] Clasificación local: ${localCategory}. Saltando caché SQLite.`);
         }
 
         // FALLBACK: If in Demo Mode, return simulated responses
@@ -709,21 +740,30 @@ app.post('/api/query', async (req, res) => {
 
             // Always use the acting persona
             const finalQuery = `### ASISTENTE CORPORATIVO DE RECURSOS HUMANOS - PLASTITEC ###
-Actúa como un asistente especializado en el Reglamento Interno de Trabajo.
+Especializado exclusivamente en el Reglamento Interno de Trabajo (RIT).
 
-### PRIORIDAD DE INTENCIÓN (OBLIGATORIA) ###
-1. SI EL MENSAJE ES SOLO CONVERSACIONAL (Hola, buen día, gracias, quién eres, ok, perfecto): Responde de forma breve y profesional.
-2. SI EL MENSAJE CONTIENE UN SALUDO/GRACIAS + CONSULTA REAL: IGNORA la parte conversacional y responde ÚNICAMENTE a la consulta sobre el reglamento.
+### CLASIFICACIÓN OBLIGATORIA (JSON) ###
+Clasifica la intención en:
+1. reglamento (Permisos, sanciones, horarios, vacaciones, obligaciones, derechos, normas).
+2. confidencial (Salarios individual, pago exacto, datos privados).
+3. fuera_de_dominio (Temas no laborales/RIT).
+4. casual (Saludos, gracias, charla sin intención laboral).
+5. maliciosa (SQL, código, sin sentido).
 
-### CLASIFICACIÓN DE CATEGORÍA ###
-1. INFORMACIÓN CONFIDENCIAL PERSONAL O SALARIAL (Salario individual, pago exacto, datos privados).
-2. CONSULTA GENERAL DEL REGLAMENTO (Permisos, sanciones, horarios, obligaciones, derechos, normas).
-3. PREGUNTA FUERA DE DOMINIO.
+### FORMATO DE RESPUESTA (OBLIGATORIO) ###
+Debes responder ÚNICAMENTE con un objeto JSON:
+{
+  "classification": "categoría_elegida",
+  "answer": "tu_respuesta_aquí"
+}
 
-### REGLAS DE RESPUESTA ###
-- CATEGORÍA 1: RESPONDE ÚNICAMENTE: "No puedo proporcionar información confidencial sobre salarios o datos personales. Para conocer tu información exacta, consulta directamente con RRHH."
-- CATEGORÍA 2: Responde directo, máximo 3-4 líneas, sin lenguaje innecesario, tono humano y profesional.
-- CATEGORÍA 3: Indica brevemente que el tema no está contemplado en el Reglamento Interno de Trabajo.
+### REGLAS DE RESPUESTA (PRIORIDAD ABSOLUTA) ###
+- REGLA INQUEBRANTABLE: Si el mensaje contiene una consulta laboral o del RIT, IGNORA el saludo. Responde directamente la consulta. No digas "Hola" ni "Buen día" si hay una pregunta.
+- SOLO responde con saludo/gracias si el mensaje es EXACTAMENTE una expresión conversacional aislada (ej: "Hola", "Buen día", "Gracias").
+- reglamento: Responde directo, 3-4 líneas, tono humano, sin texto innecesario.
+- confidencial: ÚNICAMENTE "No puedo proporcionar información confidencial sobre salarios o datos personales. Para conocer tu información exacta, consulta directamente con RRHH."
+- fuera_de_dominio: Indica brevemente que solo respondes sobre el RIT.
+- maliciosa: Ignora o respuesta neutral.
 
 Consulta: ${queryToUse}`;
 
@@ -763,68 +803,43 @@ Consulta: ${queryToUse}`;
         let finalId = finalConversationId;
 
         // Limpieza y parseo avanzado (Extrae texto de JSON si NotebookLM responde con estructura)
+        let aiClassification = null;
+        try {
+            // Buscamos si el texto es o contiene un JSON
+            const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                const parsed = JSON.parse(jsonMatch[0]);
+                if (parsed.classification) aiClassification = parsed.classification;
+                // Si viene "answer", actualizamos responseText a solo ese valor
+                if (parsed.answer) responseText = parsed.answer;
+            }
+        } catch (e) {
+            console.warn('⚠️ No se pudo extraer clasificación JSON del backend:', e.message);
+        }
+
         responseText = cleanResponse(responseText);
 
-        // --- VALIDA SI REINTENTAR (SI ES INVÁLIDA Y NO HA REINTENTADO) ---
-        if (isResponseInvalid(responseText) && notebookId !== 'DEMO_MODE') {
-            console.log('🔄 [Accuracy Boost] Respuesta negativa detectada. Reintentando con reformulación...');
-            const reformulated = reformulateQuery(query);
-            const secondAttempt = await performQuery(reformulated, 1);
-
-            const secondText = cleanResponse(secondAttempt.text);
-
-            // Si la segunda respuesta NO es inválida, la usamos
-            if (!isResponseInvalid(secondText)) {
-                console.log('✅ [Accuracy Boost] Segunda consulta exitosa.');
-                responseText = secondText;
-                finalId = secondAttempt.conversationId;
-            } else {
-                console.log('❌ [Accuracy Boost] Segunda consulta también falló.');
-            }
-        }
-
-        // --- GUARDIÁN DE PRIVACIDAD POST-PROCESO ---
-        if (PrivacyService.classify(query) === 'sensitive' || responseText.toLowerCase().includes('gana') || responseText.toLowerCase().includes('sueldo')) {
-            if (!responseText.includes("consulta directamente con RRHH")) {
-                console.log('🛡️ [Security Guard] Forzando respuesta corta reglamentaria.');
-                responseText = "No puedo proporcionar información confidencial sobre salarios o datos personales.\nPara conocer tu información exacta, consulta directamente con RRHH.";
-            }
-        }
-
-        // Final safe-guard for the "No answer received" string or empty responses
-        if (!responseText || responseText.toLowerCase().includes('no answer received.')) {
-            responseText = 'Lo siento, no encuentro información específica sobre ese tema en mi base de conocimientos. Por favor, consulta directamente con el departamento de Recursos Humanos para obtener una respuesta detallada.';
-        }
+        // --- SEGUNDA CAPA DE SEGURIDAD: PrivacyService con clasificación de IA ---
+        const finalCategory = PrivacyService.classify(query, aiClassification);
+        const finalIsInvalid = (finalCategory !== 'reglamento');
 
         const backendTotal = Date.now() - start;
-        console.log(`[Query] ✅ Complete. Backend total: ${backendTotal}ms`);
+        console.log(`[Query] ✅ Complete. Category: ${finalCategory} | Backend total: ${backendTotal}ms`);
 
-        // --- PASO 2: Validación de Privacidad y Persistencia en SQLite ---
-        const finalIsInvalid = isResponseInvalid(responseText);
-
-        if (finalIsInvalid) {
-            console.log('ℹ️ [SQLite] No guardado: respuesta marcada como fuera de alcance.');
-        } else if (notebookId.includes('DEMO')) {
-            console.log('ℹ️ [SQLite] No guardado: servidor en DEMO_MODE.');
+        // --- PASO 2: Persistencia SELECTIVA en SQLite ---
+        if (!finalIsInvalid && !notebookId.includes('DEMO')) {
+            const saveResult = await DatabaseService.storeOrUpdate(query, responseText, 'general', 'notebooklm', knowledgeVersion);
+            console.log(`💾 [SQLite] Intento de guardado (Categoría: ${finalCategory}) -> ${saveResult}`);
         } else {
-            const isSafe = PrivacyService.isSafeToCache(query, responseText);
-            if (isSafe) {
-                // UPSERT real — incluye knowledge_version actual para tracking de revalidación
-                const saveResult = await DatabaseService.storeOrUpdate(query, responseText, 'general', 'notebooklm', knowledgeVersion);
-                if (saveResult === 'inserted') {
-                    console.log(`💾 [SQLite] ✅ Nueva entrada persistida (v${knowledgeVersion}).`);
-                } else if (saveResult === 'updated') {
-                    console.log('🔄 [SQLite] Entrada existente: uso incrementado.');
-                }
-            } else {
-                console.log('⛔ [SQLite] No guardado: contenido marcado como sensible por PrivacyService.');
-            }
+            console.log(`ℹ️ [SQLite] No guardado - Categoría: ${finalCategory}${notebookId.includes('DEMO') ? ' (DEMO_MODE)' : ''}`);
         }
 
         if (finalIsInvalid) {
             return res.json({
                 response: responseText,
-                outOfScope: true,
+                outOfScope: finalCategory === 'fuera_de_dominio',
+                securityBlocked: finalCategory === 'confidencial' || finalCategory === 'maliciosa',
+                category: finalCategory,
                 conversationId: finalId
             });
         }

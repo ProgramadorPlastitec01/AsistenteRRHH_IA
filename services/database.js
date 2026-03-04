@@ -301,12 +301,22 @@ class DatabaseService {
             const fullRow = await this.db.get(
                 `SELECT * FROM knowledge_base WHERE id = ?`, [bestMatch.id]
             );
-            await this.incrementUsage(bestMatch.id);
+            // ELIMINADO: incrementUsage ahora se controla desde el server.js post-clasificación
             console.log(`✅ [SQLite] Similitud ${(maxScore * 100).toFixed(1)}% para: "${question}"`);
             return fullRow;
         }
 
         return null;
+    }
+
+    /**
+     * Elimina un registro por ID.
+     * @param {number} id
+     */
+    async delete(id) {
+        if (!this.db) return;
+        await this.db.run(`DELETE FROM knowledge_base WHERE id = ?`, [id]);
+        console.log(`🗑️ [SQLite] Registro id:${id} eliminado (Fuera de RIT)`);
     }
 
     /**

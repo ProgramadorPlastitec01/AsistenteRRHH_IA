@@ -57,9 +57,9 @@ class IntentEngine {
 
         const normalized = normalize(text);
 
-        // 1. Detección de Saludos
-        if (/^(hola|buenos dias|buenas tardes|buenas noches|que tal|hi|hello)$/.test(normalized) ||
-            normalized.startsWith('hola ')) {
+        // 1. Detección de Saludos (Solo si es la expresión aislada)
+        const commonGreetings = /^(hola|buenos dias|buenas tardes|buenas noches|que tal|hi|hello)$/;
+        if (commonGreetings.test(normalized)) {
             return { type: 'greeting', response: getRandomResponse('greeting'), confidence: 1.0 };
         }
 
@@ -73,8 +73,9 @@ class IntentEngine {
             return { type: 'capabilities', response: getRandomResponse('capabilities'), confidence: 1.0 };
         }
 
-        // 5. Agradecimiento
-        if (/(gracias|te agradezco|muy amable|ok gracias)/.test(normalized)) {
+        // 5. Agradecimiento (Solo si es la expresión aislada)
+        const commonThanks = /^(gracias|muchas gracias|mil gracias|ok gracias|muy amable)$/;
+        if (commonThanks.test(normalized)) {
             return { type: 'gratitude', response: getRandomResponse('gratitude'), confidence: 1.0 };
         }
 

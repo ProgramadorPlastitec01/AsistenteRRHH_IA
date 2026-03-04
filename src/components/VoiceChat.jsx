@@ -86,6 +86,13 @@ const VoiceChat = () => {
         return /iPhone|iPad|iPod|Android|webOS/i.test(ua) || window.innerWidth <= 768;
     })());
 
+    // Tablet/Kiosk Detection: Large touch device (>= 768px + Touch support)
+    const isTabletOrKiosk = useRef((() => {
+        const hasTouch = navigator.maxTouchPoints > 0;
+        const isLargeScreen = window.innerWidth >= 768;
+        return hasTouch && isLargeScreen;
+    })());
+
     useEffect(() => {
         if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
             setIsSupported(false);
@@ -285,7 +292,7 @@ const VoiceChat = () => {
         startListening();
     };
 
-    const startListening = (isRetry = false) => {
+    const startListening = (isRetry = false, fromAutoActivate = false) => {
         if (!isSupported) return;
 
         // 🔒 LOCK CHECK
@@ -294,8 +301,9 @@ const VoiceChat = () => {
             return;
         }
 
-        if (stateRef.current !== 'IDLE' && !isRetry) {
-            console.warn('[VoiceChat] startListening blocked: state not idle');
+        // Allow bypassing IDLE check if we are transitioning from INIT (auto-activate)
+        if (stateRef.current !== 'IDLE' && !isRetry && !fromAutoActivate) {
+            console.warn(`[VoiceChat] startListening blocked: state not idle (current: ${stateRef.current})`);
             return;
         }
 
@@ -527,6 +535,12 @@ const VoiceChat = () => {
 
             // 4. Solo tras éxito total, cambiar de vista
             setAppState('IDLE');
+
+            // 📱 UX IMPROVEMENT: Auto-trigger voice if Tablet/Kiosk (reduced click)
+            if (isTabletOrKiosk.current) {
+                console.log('📱 Tablet/Kiosk detected — triggering auto-voice...');
+                startListening(false, true);
+            }
 
         } catch (e) {
             console.error('[Mic] Error crítico en activación:', e.message);

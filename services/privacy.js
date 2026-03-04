@@ -10,83 +10,75 @@
  * impredecible en invocaciones sucesivas con el mismo patrón.
  */
 
+export const CATEGORIES = {
+    REGLAMENTO: 'reglamento',
+    CONFIDENCIAL: 'confidencial',
+    FUERA_DE_DOMINIO: 'fuera_de_dominio',
+    CASUAL: 'casual',
+    MALICIOSA: 'maliciosa'
+};
+
 const SENSITIVE_KEYWORDS = [
-    // --- CATEGORÍA 1: INFORMACIÓN CONFIDENCIAL PERSONAL O SALARIAL (BLOQUEO) ---
+    // --- CATEGORÍA: CONFIDENCIAL ---
     'mi salario', 'mi sueldo', 'mi pago', 'mi nómina', 'mi contrato',
     'cuánto gano', 'cuanto gano', 'mis ingresos', 'salario exacto',
     'desprendible de pago', 'comprobante de pago',
     'salario de', 'sueldo de', 'cuánto gana', 'cuanto gana',
     'bonificación personal', 'comisión personal',
     'mi cuenta bancaria', 'mi tarjeta', 'mi nit', 'mi cédula', 'mi cedula',
-    'mi dirección', 'mi telefono', 'mi correo personal',
-    'datos privados', 'información confidencial personal'
+    'mi dirección', 'mi telefono', 'mi correo personal'
 ];
 
-/**
- * Patrones RegEx para detectar datos estructurados sensibles.
- *
- * ⚠️ IMPORTANTE — Sin flag `g`:
- * Los RegExp literales con flag `g` son stateful por su propiedad `lastIndex`.
- * Al estar en un array de módulo, se reutilizan entre llamadas y pueden
- * retornar resultados alternos (true → false → true...) con la misma cadena.
- * La solución es NO usar flag `g` cuando solo se necesita .test().
- */
-const SENSITIVE_PATTERNS = [
-    /\b\d{7,10}\b/,        // Números de documento de identidad
-    /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/, // Emails
-    /\b\d[\d -]{8,}\d\b/,  // Números de teléfono (10+ dígitos con posibles espacios/guiones)
-    /\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/, // Números de tarjeta (16 dígitos)
-];
+const CASUAL_KEYWORDS = ['hola', 'buen día', 'buenos días', 'buenas tardes', 'buenas noches', 'gracias', 'gracias!', 'ok', 'perfecto', 'quién eres', 'quien eres'];
 
 class PrivacyService {
     /**
-     * Clasifica el contenido como 'general' o 'sensitive'.
-     * @param {string} text Texto a analizar (pregunta o respuesta).
-     * @returns {'general'|'sensitive'}
+     * Clasifica el contenido en uno de los 5 niveles.
+     * @param {string} text Texto a analizar.
+     * @param {string} aiClassification Clasificación sugerida por la IA (opcional).
+     * @returns {string} Categoría final.
      */
-    static classify(text) {
-        if (!text || typeof text !== 'string') return 'sensitive';
-        const lowerText = text.toLowerCase();
+    static classify(text, aiClassification = null) {
+        if (!text || typeof text !== 'string') return CATEGORIES.MALICIOSA;
 
-        // 1. Verificación rápida por palabras clave (O(n) sobre keywords)
+        const lowerText = text.toLowerCase().trim();
+
+        // 1. Detección de Malicia (Heurística simple ante inyecciones o comandos)
+        if (lowerText.includes('drop table') || lowerText.includes('delete from') || lowerText.includes('<script') || lowerText.startsWith('/')) {
+            return CATEGORIES.MALICIOSA;
+        }
+
+        // 2. Si la IA ya clasificó, confiamos en su juicio semántico si coincide con nuestros tiers
+        if (aiClassification && Object.values(CATEGORIES).includes(aiClassification)) {
+            return aiClassification;
+        }
+
+        // 3. Verificación manual por Keywords (Fallback o Refuerzo)
         for (const keyword of SENSITIVE_KEYWORDS) {
-            if (lowerText.includes(keyword)) {
-                return 'sensitive';
+            if (lowerText.includes(keyword)) return CATEGORIES.CONFIDENCIAL;
+        }
+
+        for (const casual of CASUAL_KEYWORDS) {
+            if (lowerText === casual || lowerText.startsWith(casual + ' ')) {
+                // Solo si es predominantemente casual
+                if (lowerText.length < casual.length + 10) return CATEGORIES.CASUAL;
             }
         }
 
-        // 2. Verificación por patrones estructurados (sin flag g → siempre stateless)
-        for (const pattern of SENSITIVE_PATTERNS) {
-            if (pattern.test(text)) {
-                return 'sensitive';
-            }
-        }
-
-        return 'general';
+        // Por defecto, si llegamos aquí y no hay una consulta del RIT clara, 
+        // la IA debería haber determinado si es reglamento o fuera_de_dominio.
+        return CATEGORIES.REGLAMENTO;
     }
 
     /**
      * Determina si un par pregunta+respuesta es seguro para persistir en SQLite.
-     * Ambos (pregunta Y respuesta) deben ser 'general' para aprobar.
+     * SOLO la categoría 'reglamento' es segura para el Knowledge DB.
      *
-     * @param {string} question
-     * @param {string} answer
+     * @param {string} category Categoría detectada
      * @returns {boolean} true = seguro para guardar
      */
-    static isSafeToCache(question, answer) {
-        const qClass = this.classify(question);
-        const aClass = this.classify(answer);
-
-        if (qClass !== 'general') {
-            console.log(`⛔ [Privacidad] Pregunta clasificada como sensible: "${question.substring(0, 50)}..."`);
-            return false;
-        }
-        if (aClass !== 'general') {
-            console.log(`⛔ [Privacidad] Respuesta clasificada como sensible (contiene datos personales).`);
-            return false;
-        }
-
-        return true;
+    static isSafeToCache(category) {
+        return category === CATEGORIES.REGLAMENTO;
     }
 }
 
