@@ -11,16 +11,15 @@
  */
 
 const SENSITIVE_KEYWORDS = [
-    'salario', 'sueldo', 'nómina', 'nomina', 'desprendible', 'bonificación', 'bonificacion',
-    'comisión', 'comision', 'prestación', 'prestacion', 'cesantía', 'cesantia',
-    'documento', 'cédula', 'cedula', 'nit', 'pasaporte',
-    'correo', 'email', 'teléfono', 'telefono', 'celular', 'dirección', 'direccion',
-    'contrato', 'cláusula', 'clausula', 'disciplinario', 'sanción', 'sancion', 'falta',
-    'incapacidad', 'médico', 'medico', 'eps', 'arl', 'afp', 'pensión', 'pension',
-    'cuenta bancaria', 'clabe', 'tarjeta', 'financiero', 'deuda',
-    'personal', 'privado', 'confidencial',
-    'cuánto gano', 'cuanto gano', 'mis ingresos', 'mi sueldo', 'mi salario',
-    'pago de nómina', 'pago de nomina', 'mi pago', 'mi contrato'
+    // --- CATEGORÍA 1: INFORMACIÓN CONFIDENCIAL PERSONAL O SALARIAL (BLOQUEO) ---
+    'mi salario', 'mi sueldo', 'mi pago', 'mi nómina', 'mi contrato',
+    'cuánto gano', 'cuanto gano', 'mis ingresos', 'salario exacto',
+    'desprendible de pago', 'comprobante de pago',
+    'salario de', 'sueldo de', 'cuánto gana', 'cuanto gana',
+    'bonificación personal', 'comisión personal',
+    'mi cuenta bancaria', 'mi tarjeta', 'mi nit', 'mi cédula', 'mi cedula',
+    'mi dirección', 'mi telefono', 'mi correo personal',
+    'datos privados', 'información confidencial personal'
 ];
 
 /**

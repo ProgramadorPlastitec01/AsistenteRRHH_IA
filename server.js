@@ -131,6 +131,47 @@ let knowledgeVersion = (() => {
 console.log(`📚 Knowledge Version cargada: v${knowledgeVersion}`);
 
 /**
+ * Limpia y parsea avanzado: Extrae el texto de la respuesta si la IA devuelve una estructura JSON
+ * o tiene ruido de citas/caracteres especiales.
+ * 
+ * @param {string} text Texto crudo de la IA o de la caché
+ * @returns {string} Texto limpio listo para el usuario
+ */
+const cleanResponse = (text) => {
+    if (!text) return "";
+    let processed = text;
+
+    // 1. Intenta parsear directamente (si es un JSON puro)
+    try {
+        const parsed = JSON.parse(text);
+        if (parsed.answer) return String(parsed.answer);
+        if (parsed.response) return String(parsed.response);
+    } catch (e) {
+        // 2. Si falla, intenta buscar un bloque JSON contenido dentro del texto usando Regex
+        try {
+            const jsonMatch = text.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                const parsed = JSON.parse(jsonMatch[0]);
+                if (parsed.answer) return String(parsed.answer);
+                if (parsed.response) return String(parsed.response);
+            }
+        } catch (e2) {
+            // 3. Fallback: Si no es JSON pero parece tener "answer": "...", intenta extraerlo manualmente
+            const manualMatch = text.match(/"answer"\s*:\s*"([\s\S]*?)"/);
+            if (manualMatch && manualMatch[1]) {
+                return manualMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').trim();
+            }
+        }
+    }
+
+    // 4. Limpieza final de citas [1], [2] y caracteres de control si el parseo falló
+    return processed
+        .replace(/\[\d+\]/g, '') // Quitar citas
+        .replace(/^[ \t]*[\{\}][ \t]*$/gm, '') // Quitar llaves que estén en líneas solas
+        .trim();
+};
+
+/**
  * Revalida un registro SQLite en segundo plano sin bloquear la respuesta al usuario.
  * Solo actualiza SQLite si la respuesta de NotebookLM cambió significativamente.
  *
@@ -142,34 +183,32 @@ async function revalidateInBackground(query, cachedRow) {
         console.log(`🔍 [Revalidation] Iniciando para: "${query.substring(0, 60)}" (id:${cachedRow.id})`);
 
         // Reutilizar el mismo prompt del query handler
-        const revalQuery = `ASISTENTE DE RRHH CORPORATIVO — KIOSKO PLASTITEC.
-Consultas basadas exclusivamente en el Reglamento Interno de Trabajo (RIT) y documentos oficiales internos.
+        const revalQuery = `### ASISTENTE CORPORATIVO DE RECURSOS HUMANOS - PLASTITEC ###
+Respuesta basada solamente en el Reglamento Interno de Trabajo (RIT) y políticas oficiales.
 
-Consulta del colaborador: ${query}
+### PRIORIDAD DE INTENCIÓN (OBLIGATORIA) ###
+1. SI EL MENSAJE ES SOLO CONVERSACIONAL (Hola, gracias, etc.): Responde de forma breve y profesional.
+2. SI EL MENSAJE CONTIENE UNA CONSULTA REAL (aunque incluya saludo/gracias): IGNORA el saludo/gracias y responde ÚNICAMENTE a la consulta sobre el reglamento.
 
-INSTRUCCIONES DE RESPUESTA (seguir estrictamente):
-- Máximo 6 a 8 líneas en total.
-- Sin frases de apertura. Sin emojis. Sin encabezados. Lenguaje profesional y neutro.
+### CLASIFICACIÓN DE CATEGORÍA ###
+1. INFORMACIÓN CONFIDENCIAL PERSONAL O SALARIAL (Bloqueo).
+2. CONSULTA GENERAL DEL REGLAMENTO (Permisos, sanciones, horarios, derechos).
+3. PREGUNTA FUERA DE DOMINIO.
 
-PROCESO DE ANÁLISIS OBLIGATORIO antes de responder:
-1. Buscar si el documento menciona el tema de forma DIRECTA.
-2. Si no, buscar normas, reglas, procedimientos o condiciones RELACIONADAS o INDIRECTAS.
-3. Responder con lo que sí esté documentado, aunque sea información vinculada.
-4. SOLO si no existe ninguna mención directa NI indirecta, indicarlo en una frase breve.
+### REGLAS DE RESPUESTA ###
+- CATEGORÍA 1: "No puedo proporcionar información confidencial sobre salarios o datos personales. Para conocer tu información exacta, consulta directamente con RRHH."
+- CATEGORÍA 2: Responde directo, máximo 3-4 líneas, lenguaje claro y humano.
+- CATEGORÍA 3: Indica brevemente que el tema no está contemplado en el RIT.
 
-FORMATO CUANDO NO HAY DATO EXACTO:
-- Primera línea: indicar que el RIT no menciona ese punto específico.
-- Segunda parte: informar lo que el documento sí establece sobre el tema relacionado.
-- Nunca inventar ni asumir información no documentada.`;
+Consulta: ${query}`;
 
         const result = await mcpClient.callTool({
             name: 'notebook_query',
             arguments: { notebook_id: notebookId, query: revalQuery }
         });
 
-        const newAnswer = result.content[0].text
-            .replace(/\[\d+\]/g, '')
-            .trim();
+        // Aplicamos limpieza profunda antes de guardar en SQLite
+        const newAnswer = cleanResponse(result.content[0].text);
 
         if (DatabaseService.hasSignificantChange(cachedRow.answer, newAnswer)) {
             await DatabaseService.markRevalidated(cachedRow.id, newAnswer, knowledgeVersion);
@@ -556,7 +595,8 @@ const isResponseInvalid = (text) => {
         "no tengo datos",
         "no tengo información disponible",
         "lo siento, no encuentro",
-        "lo siento, no tengo"
+        "lo siento, no tengo",
+        "no answer received"
     ];
     const lowerText = text.toLowerCase();
     return invalidMarkers.some(marker => lowerText.includes(marker));
@@ -566,7 +606,7 @@ const isResponseInvalid = (text) => {
  * Reformula una consulta para mejorar la probabilidad de encontrar información
  */
 const reformulateQuery = (originalQuery) => {
-    return `Información detallada sobre: "${originalQuery}", basándote exclusivamente en el Reglamento Interno de Trabajo, políticas de RRHH y documentos oficiales de PLASTITEC.`;
+    return `Respuesta directa y humana sobre: "${originalQuery}", consultando exclusivamente el Reglamento Interno de Trabajo y políticas de PLASTITEC. Sin introducciones.`;
 };
 
 /**
@@ -591,6 +631,17 @@ app.post('/api/query', async (req, res) => {
 
         console.log(`Processing query: "${query}"`);
 
+        // --- FILTRO DE PRIVACIDAD PREVENTIVO (ORDEN DE PRIORIDAD OBLIGATORIO) ---
+        // Se evalúa ANTES de consultar el reglamento o la caché.
+        if (PrivacyService.classify(query) === 'sensitive') {
+            console.log('🛡️ [Privacy Guard] Bloqueo preventivo: Pregunta detectada como sensible.');
+            return res.json({
+                response: "No puedo proporcionar información confidencial sobre salarios o datos personales.\nPara conocer tu información exacta, consulta directamente con RRHH.",
+                outOfScope: true,
+                securityBlocked: true
+            });
+        }
+
         // --- PASO 1: Búsqueda en Caché Local (SQLite — fuente de verdad persistente) ---
         try {
             const cachedResult = await DatabaseService.findSimilar(query);
@@ -608,8 +659,13 @@ app.post('/api/query', async (req, res) => {
                 }
 
                 console.log(`🚀 [SQLite Cache Hit] Coincidencia ${cacheType} — uso #${cachedResult.usage_count + 1}${shouldRevalidate ? ' (revalidando en BG)' : ''}`);
+
+                // IMPORTANTE: Limpiamos la respuesta de la caché antes de enviarla, 
+                // por si se guardó con JSON o ruido en versiones anteriores.
+                const cleanCachedAnswer = cleanResponse(cachedResult.answer);
+
                 return res.json({
-                    response: cachedResult.answer,
+                    response: cleanCachedAnswer,
                     outOfScope: false,
                     cached: true,
                     cacheSource: 'sqlite',
@@ -652,27 +708,24 @@ app.post('/api/query', async (req, res) => {
             console.log(`[Query] MCP call started at +${mcpStart - start}ms (Retry: ${retryCount})`);
 
             // Always use the acting persona
-            const finalQuery = `ASISTENTE DE RRHH CORPORATIVO — KIOSKO PLASTITEC.
-Consultas basadas exclusivamente en el Reglamento Interno de Trabajo (RIT) y documentos oficiales internos.
+            const finalQuery = `### ASISTENTE CORPORATIVO DE RECURSOS HUMANOS - PLASTITEC ###
+Actúa como un asistente especializado en el Reglamento Interno de Trabajo.
 
-Consulta del colaborador: ${queryToUse}
+### PRIORIDAD DE INTENCIÓN (OBLIGATORIA) ###
+1. SI EL MENSAJE ES SOLO CONVERSACIONAL (Hola, buen día, gracias, quién eres, ok, perfecto): Responde de forma breve y profesional.
+2. SI EL MENSAJE CONTIENE UN SALUDO/GRACIAS + CONSULTA REAL: IGNORA la parte conversacional y responde ÚNICAMENTE a la consulta sobre el reglamento.
 
-INSTRUCCIONES DE RESPUESTA (seguir estrictamente):
-- Máximo 6 a 8 líneas en total.
-- Sin frases de apertura. Sin emojis. Sin encabezados. Lenguaje profesional y neutro.
+### CLASIFICACIÓN DE CATEGORÍA ###
+1. INFORMACIÓN CONFIDENCIAL PERSONAL O SALARIAL (Salario individual, pago exacto, datos privados).
+2. CONSULTA GENERAL DEL REGLAMENTO (Permisos, sanciones, horarios, obligaciones, derechos, normas).
+3. PREGUNTA FUERA DE DOMINIO.
 
-PROCESO DE ANÁLISIS OBLIGATORIO antes de responder:
-1. Buscar si el documento menciona el tema de forma DIRECTA.
-2. Si no, buscar normas, reglas, procedimientos o condiciones RELACIONADAS o INDIRECTAS.
-3. Responder con lo que sí esté documentado, aunque sea información vinculada.
-4. SOLO si no existe ninguna mención directa NI indirecta, indicarlo en una frase breve.
+### REGLAS DE RESPUESTA ###
+- CATEGORÍA 1: RESPONDE ÚNICAMENTE: "No puedo proporcionar información confidencial sobre salarios o datos personales. Para conocer tu información exacta, consulta directamente con RRHH."
+- CATEGORÍA 2: Responde directo, máximo 3-4 líneas, sin lenguaje innecesario, tono humano y profesional.
+- CATEGORÍA 3: Indica brevemente que el tema no está contemplado en el Reglamento Interno de Trabajo.
 
-FORMATO CUANDO NO HAY DATO EXACTO:
-- Primera línea: indicar que el RIT no menciona ese punto específico.
-- Segunda parte: informar lo que el documento sí establece sobre el tema relacionado.
-- Nunca inventar ni asumir información no documentada.
-
-EJEMPLO OPCIONAL: Agregar ejemplo breve (máximo 2 líneas) solo si la respuesta involucra una política, procedimiento o norma que puede interpretarse de varias formas. Introducir con "Ejemplo:" o "Por ejemplo:". Omitir si la respuesta es un dato puntual o afirmativa/negativa simple.`;
+Consulta: ${queryToUse}`;
 
             const result = await mcpClient.callTool({
                 name: 'notebook_query',
@@ -709,16 +762,7 @@ EJEMPLO OPCIONAL: Agregar ejemplo breve (máximo 2 líneas) solo si la respuesta
         let responseText = rawText;
         let finalId = finalConversationId;
 
-        // Limpieza y parseo básico
-        const cleanResponse = (text) => {
-            let processed = text;
-            try {
-                const parsed = JSON.parse(text);
-                if (parsed.answer) processed = parsed.answer;
-            } catch (e) { }
-            return processed.replace(/\[\d+\]/g, '').trim();
-        };
-
+        // Limpieza y parseo avanzado (Extrae texto de JSON si NotebookLM responde con estructura)
         responseText = cleanResponse(responseText);
 
         // --- VALIDA SI REINTENTAR (SI ES INVÁLIDA Y NO HA REINTENTADO) ---
@@ -737,6 +781,19 @@ EJEMPLO OPCIONAL: Agregar ejemplo breve (máximo 2 líneas) solo si la respuesta
             } else {
                 console.log('❌ [Accuracy Boost] Segunda consulta también falló.');
             }
+        }
+
+        // --- GUARDIÁN DE PRIVACIDAD POST-PROCESO ---
+        if (PrivacyService.classify(query) === 'sensitive' || responseText.toLowerCase().includes('gana') || responseText.toLowerCase().includes('sueldo')) {
+            if (!responseText.includes("consulta directamente con RRHH")) {
+                console.log('🛡️ [Security Guard] Forzando respuesta corta reglamentaria.');
+                responseText = "No puedo proporcionar información confidencial sobre salarios o datos personales.\nPara conocer tu información exacta, consulta directamente con RRHH.";
+            }
+        }
+
+        // Final safe-guard for the "No answer received" string or empty responses
+        if (!responseText || responseText.toLowerCase().includes('no answer received.')) {
+            responseText = 'Lo siento, no encuentro información específica sobre ese tema en mi base de conocimientos. Por favor, consulta directamente con el departamento de Recursos Humanos para obtener una respuesta detallada.';
         }
 
         const backendTotal = Date.now() - start;
