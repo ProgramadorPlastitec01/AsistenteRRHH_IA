@@ -71,15 +71,14 @@ class NotebookLMClient {
             return intent.response;
         }
 
-        // 2. CONSULTA DE CAcHÉ EN RAM (QuickCache — solo para la sesión actual)
-        // Nota: esta caché NO persiste entre reinicios. Su rol es evitar re-consultas
-        // repetidas durante la misma sesión. El SQLite del servidor es la fuente de verdad.
+        // 2. CONSULTA DE CACHÉ (Memoria)
         const cachedResponse = QuickCache.get(queryText);
         if (cachedResponse) {
             const latency = (performance.now() - startTime).toFixed(2);
-            console.log(`[RamCache HIT] ⚡ Respuesta en memoria de sesión (${latency}ms) — no persiste tras reinicio`);
+            console.log(`[HybridEngine] ⚡ Cache HIT (${latency}ms)`);
 
-            this.logAnalytics('RamCacheHit', {
+            // Reportar cache hit
+            this.logAnalytics('LocalCacheHit', {
                 query: queryText,
                 latencyMs: latency
             });
@@ -171,19 +170,13 @@ class NotebookLMClient {
                 this.conversationId = data.conversationId;
             }
 
-            // 4. GUARDAR EN RAM CACHE (solo si NO vino ya de SQLite)
-            // Si cached:true el servidor ya lo tiene en SQLite; no necesitamos duplicar en RAM.
-            if (!data.cached && data.response && data.response.length > 10) {
+            // 4. GUARDAR EN CACHÉ (Para futuras consultas idénticas)
+            if (data.response && data.response.length > 10) {
                 QuickCache.set(queryText, data.response);
-                console.log(`[RamCache SET] Respuesta guardada en memoria de sesión.`);
             }
 
             const totalLatency = (performance.now() - startTime).toFixed(0);
-            if (data.cached) {
-                console.log(`[SQLite Cache HIT] 📂 Respuesta persistente del servidor (${totalLatency}ms)`);
-            } else {
-                console.log(`[HybridEngine] 🏁 Respuesta remota NotebookLM completada en ${totalLatency}ms`);
-            }
+            console.log(`[HybridEngine] 🏁 Respuesta remota completada en ${totalLatency}ms`);
 
             return data.response;
 

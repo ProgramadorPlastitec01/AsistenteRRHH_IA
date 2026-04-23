@@ -1,70 +1,68 @@
-import { useState, useEffect, useRef, useReducer } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence, useMotionValue, useTransform } from 'framer-motion';
 import notebookLMClient from '../utils/notebookLMClient';
 import IntentEngine from '../utils/NexusIntentEngine'; // Updated import
-import logger from '../utils/logger';
-import conversationStore from '../utils/conversationStore';
 import { API_BASE_URL } from '../utils/apiConfig';
 import NexusCore from './NexusCore';
 import CompanyLogo from './CompanyLogo';
 import TypewriterText from './TypewriterText';
 import AnalyticsDashboard from './AnalyticsDashboard';
+import HelpGuide from './HelpGuide';
 
-const initialState = {
-    appState: 'INIT', // INIT, IDLE, LISTENING, PROCESSING, RESPONDING, ERROR
-    transcript: '',
-    response: '',
-    error: null,
-    processingStep: 0, // 1: Recibiendo, 2: Analizando, 3: Generando
+const ListeningProgressBar = ({ isActive, onTimeUp, maxTime = 10000 }) => {
+    // Usar useRef para evitar re-creación de timers ante renders secundarios
+    const onTimeUpRef = useRef(onTimeUp);
+    useEffect(() => {
+        onTimeUpRef.current = onTimeUp;
+    }, [onTimeUp]);
+
+    useEffect(() => {
+        if (isActive) {
+            const timer = setTimeout(() => {
+                if (onTimeUpRef.current) onTimeUpRef.current();
+            }, maxTime);
+            return () => clearTimeout(timer);
+        }
+    }, [isActive, maxTime]);
+
+    if (!isActive) return null;
+
+    return (
+        <motion.div 
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 10 }}
+            className="w-full max-w-[200px] mx-auto mt-6 opacity-80"
+        >
+            <div className="text-[10px] text-red-400 font-bold mb-2 uppercase tracking-[0.2em]">
+                Límite de grabación
+            </div>
+            <div className="h-1.5 w-full bg-white/10 rounded-full overflow-hidden shadow-inner">
+                <motion.div 
+                    initial={{ width: "100%" }}
+                    animate={{ width: "0%" }}
+                    transition={{ duration: maxTime / 1000, ease: "linear" }}
+                    className="h-full bg-gradient-to-r from-red-500 to-red-400 shadow-[0_0_8px_rgba(239,68,68,0.8)]"
+                />
+            </div>
+        </motion.div>
+    );
 };
 
-function chatReducer(state, action) {
-    // Log for tablet debugging
-    console.log(`[State Transition] ${state.appState} -> ${action.type}`, action.payload !== undefined ? action.payload : '');
-
-    switch (action.type) {
-        case 'SET_INIT':
-            return { ...initialState, appState: 'INIT' };
-        case 'START_LISTENING':
-            return { ...state, appState: 'LISTENING', transcript: '', response: '', error: null };
-        case 'UPDATE_TRANSCRIPT':
-            return { ...state, transcript: action.payload };
-        case 'START_PROCESSING':
-            return { ...state, appState: 'PROCESSING', processingStep: 1, transcript: action.payload, error: null };
-        case 'SET_PROCESSING_STEP':
-            return { ...state, processingStep: action.payload };
-        case 'SET_RESPONSE':
-            return { ...state, response: action.payload, processingStep: 0 };
-        case 'START_RESPONDING':
-            return { ...state, appState: 'RESPONDING' };
-        case 'SET_ERROR':
-            return { ...state, appState: 'ERROR', error: action.payload, processingStep: 0 };
-        case 'RESET_IDLE':
-            // GUARD: Prevent premature reset if processing is active (WebKit fix)
-            if (state.appState === 'PROCESSING' && !action.force) {
-                console.warn('[Reducer] Guard: Blocked reset to IDLE because processing is active');
-                return state;
-            }
-            return { ...state, appState: 'IDLE', processingStep: 0 };
-        case 'CLEAR_RESPONSE':
-            return { ...state, response: '', appState: 'IDLE' };
-        case 'CLEAR_ERROR':
-            return { ...state, error: null, appState: state.appState === 'ERROR' ? 'IDLE' : state.appState };
-        default:
-            return state;
-    }
-}
-
 const VoiceChat = () => {
-    const [state, dispatch] = useReducer(chatReducer, initialState);
-    const { appState, transcript, response, error, processingStep } = state;
-
+    const [appState, setAppState] = useState('INIT'); // INIT, IDLE, LISTENING, PROCESSING, RESPONDING, ERROR
     const [isModalOpen, setIsModalOpen] = useState(false);
+    const [isGuideOpen, setIsGuideOpen] = useState(false);
+    const [transcript, setTranscript] = useState('');
+    const [response, setResponse] = useState('');
+    const [error, setError] = useState(null);
     const [timeLeft, setTimeLeft] = useState(25);
+    const [processingStep, setProcessingStep] = useState(0); // 1: Recibiendo, 2: Analizando, 3: Generando
 
     // Analytics & Debug
     const [showAnalytics, setShowAnalytics] = useState(false);
     const [performanceMetrics, setPerformanceMetrics] = useState(null);
+    const [showPinModal, setShowPinModal] = useState(false);
     const secretClickRef = useRef(0);
 
     const handleSecretClick = (e) => {
@@ -75,14 +73,13 @@ const VoiceChat = () => {
         if (navigator.vibrate) navigator.vibrate(20);
 
         if (secretClickRef.current >= 5) {
-            // Opening in a new window/tab as requested
-            window.open('/?dashboard=true', '_blank');
+            setShowPinModal(true);
             secretClickRef.current = 0;
             const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2568/2568-preview.mp3');
             audio.play().catch(() => { });
         }
 
-        // Clear counter if not finished in 2 seconds
+        // Clear counter if not finished in 2.5 seconds
         if (secretClickRef.current === 1) {
             setTimeout(() => { secretClickRef.current = 0; }, 2500);
         }
@@ -131,6 +128,13 @@ const VoiceChat = () => {
         return /iPhone|iPad|iPod|Android|webOS/i.test(ua) || window.innerWidth <= 768;
     })());
 
+    // Tablet/Kiosk Detection: Large touch device (>= 768px + Touch support)
+    const isTabletOrKiosk = useRef((() => {
+        const hasTouch = navigator.maxTouchPoints > 0;
+        const isLargeScreen = window.innerWidth >= 768;
+        return hasTouch && isLargeScreen;
+    })());
+
     useEffect(() => {
         if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
             setIsSupported(false);
@@ -139,7 +143,6 @@ const VoiceChat = () => {
         }
         notebookLMClient.initialize();
         notebookLMClient.resetConversation(); // Clear cache on startup to avoid 'Sy' bug
-        logger.startSession();
     }, []);
 
 
@@ -171,7 +174,7 @@ const VoiceChat = () => {
             interval = setInterval(() => {
                 setTimeLeft(prev => {
                     if (prev <= 1) {
-                        dispatch({ type: 'CLEAR_RESPONSE' });
+                        setResponse('');
                         return 25;
                     }
                     return prev - 1;
@@ -219,15 +222,15 @@ const VoiceChat = () => {
 
         utterance.onstart = () => {
             ttsInProgressRef.current = true;
-            dispatch({ type: 'START_RESPONDING' });
+            setAppState('RESPONDING');
         };
         utterance.onend = () => {
             ttsInProgressRef.current = false;
-            dispatch({ type: 'RESET_IDLE' });
+            setAppState(prev => prev === 'RESPONDING' ? 'IDLE' : prev);
         };
         utterance.onerror = () => {
             ttsInProgressRef.current = false;
-            dispatch({ type: 'RESET_IDLE' });
+            setAppState(prev => prev === 'RESPONDING' ? 'IDLE' : prev);
         };
 
         // Intentar seleccionar la mejor voz en español si está disponible
@@ -255,44 +258,15 @@ const VoiceChat = () => {
         const qStart = performance.now();
         console.log(`[Timing] 0ms — handleQuery started: "${queryText}"`);
 
-        // Telemetry
-        logger.startConversation(queryText);
-        logger.endPhase('transcription');
-
-        // 🧠 CACHE CHECK
-        const cachedResponse = conversationStore.getCachedResponse(queryText);
-        if (cachedResponse) {
-            console.log(`[VoiceChat] ⚡ Servido desde caché: "${queryText}"`);
-
-            dispatch({ type: 'START_PROCESSING', payload: queryText });
-
-            // Simular un pequeño retardo para feedback visual de que el sistema "piensa"
-            await new Promise(r => setTimeout(r, 600));
-
-            const totalTime = Math.round(performance.now() - logger.timers.total);
-
-            await logger.logConversation({
-                query: queryText,
-                status: 'success',
-                source: 'local', // Mark as local for cache hit
-                data: { cache_hit: true }
-            });
-
-            dispatch({ type: 'SET_RESPONSE', payload: cachedResponse });
-            speakText(cachedResponse);
-
-            isLocked.current = false;
-            return;
-        }
-
-        logger.startPhase('backend');
-
         // FORCE PROCESSING STATE IMMEDIATELY (Critical to prevent onend race condition)
-        dispatch({ type: 'START_PROCESSING', payload: queryText });
+        setAppState('PROCESSING');
+        setProcessingStep(1); // Paso 1: Recibiendo solicitud
+        setError(null);
+        setTranscript(queryText);
 
         // Timers para cambios de estado dinámicos (basados en tiempos promedio observados)
-        const step2Timer = setTimeout(() => dispatch({ type: 'SET_PROCESSING_STEP', payload: 2 }), 800);  // Analizando
-        const step3Timer = setTimeout(() => dispatch({ type: 'SET_PROCESSING_STEP', payload: 3 }), 3500); // Generando
+        const step2Timer = setTimeout(() => setProcessingStep(2), 800);  // Analizando
+        const step3Timer = setTimeout(() => setProcessingStep(3), 3500); // Generando
 
         try {
             abortControllerRef.current = new AbortController();
@@ -316,40 +290,19 @@ const VoiceChat = () => {
             if (finalResult.toLowerCase().startsWith('soy ') && !finalResult.startsWith('Soy')) finalResult = 'Soy' + finalResult.substring(3);
             if (finalResult.toLowerCase().startsWith('este ') && !finalResult.startsWith('Este')) finalResult = 'Este' + finalResult.substring(4);
 
-            const qLatency = Math.round(performance.now() - qStart);
-            logger.endPhase('backend');
+            const qLatency = (performance.now() - qStart).toFixed(0);
 
-            // Find source (local vs remote)
-            const isLocal = finalResult.includes('[Local') || finalResult.includes('Resuelto localmente');
-
+            // Metrics update
+            const total = metricsRef.current.trigger ? (performance.now() - metricsRef.current.trigger).toFixed(0) : qLatency;
             setPerformanceMetrics({
-                micMs: logger.timers.phases['transcription'] || 0,
-                recMs: 0,
-                transMs: 0,
+                micMs: metricsRef.current.micMs || 0,
+                recMs: metricsRef.current.recMs || 0,
+                transMs: metricsRef.current.transMs || 0,
                 aiMs: qLatency,
-                totalMs: Math.round(performance.now() - logger.timers.total)
+                totalMs: total
             });
 
-            await logger.logConversation({
-                query: queryText,
-                status: 'success',
-                source: isLocal ? 'local' : 'remote'
-            });
-
-            // 💾 PERSISTENCE
-            conversationStore.saveConversation(logger.sessionId, {
-                conversation_id: logger.currentConversationId,
-                query: queryText,
-                response: finalResult,
-                source: isLocal ? 'local' : 'remote',
-                total_time_ms: Math.round(performance.now() - logger.timers.total),
-                status: 'success'
-            });
-
-            // 🧠 CACHE (Save for future hits)
-            conversationStore.setCachedResponse(queryText, finalResult);
-
-            dispatch({ type: 'SET_RESPONSE', payload: finalResult });
+            setResponse(finalResult);
             // State will be set to RESPONDING by speakText -> utterance.onstart
             speakText(finalResult);
             console.log(`[VoiceChat] ✅ Respuesta recibida en ${qLatency}ms`);
@@ -357,19 +310,15 @@ const VoiceChat = () => {
         } catch (err) {
             if (err.name === 'AbortError') return;
 
-            // Report to structured logger
-            logger.logError(
-                err.name === 'TimeoutError' ? 'TIMEOUT_ERROR' : 'BACKEND_ERROR',
-                'handleQuery',
-                err.message,
-                err.stack,
-                { query: queryText }
-            );
+            // Report to backend
+            reportError('IA', 'handleQuery', err.message, err.stack, { query: queryText });
 
-            dispatch({ type: 'SET_ERROR', payload: err.message || 'Error al procesar solicitud' });
+            setError(err.message || 'Error al procesar solicitud');
+            setAppState('IDLE');
         } finally {
             clearTimeout(step2Timer);
             clearTimeout(step3Timer);
+            setProcessingStep(0);
             isLocked.current = false; // 🔓 UNLOCK AFTER ALL IS DONE
         }
     };
@@ -385,7 +334,7 @@ const VoiceChat = () => {
         startListening();
     };
 
-    const startListening = (isRetry = false) => {
+    const startListening = (isRetry = false, fromAutoActivate = false) => {
         if (!isSupported) return;
 
         // 🔒 LOCK CHECK
@@ -394,13 +343,17 @@ const VoiceChat = () => {
             return;
         }
 
-        if (stateRef.current !== 'IDLE' && !isRetry) {
-            console.warn('[VoiceChat] startListening blocked: state not idle');
+        // Allow bypassing IDLE check if we are transitioning from INIT (auto-activate)
+        if (stateRef.current !== 'IDLE' && !isRetry && !fromAutoActivate) {
+            console.warn(`[VoiceChat] startListening blocked: state not idle (current: ${stateRef.current})`);
             return;
         }
 
         if (synthRef.current) synthRef.current.cancel();
-        dispatch({ type: 'START_LISTENING' });
+        setError(null);
+        setTranscript('');
+        setResponse('');
+        setAppState('LISTENING');
 
         // 1. Manejo de Conflicto de Hardware (Especialmente para Safari/iOS)
         // Forzamos la liberación del micro ANTES de empezar el reconocimiento en móviles
@@ -449,7 +402,8 @@ const VoiceChat = () => {
 
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (!SpeechRecognition) {
-            dispatch({ type: 'SET_ERROR', payload: 'Tu navegador no soporta reconocimiento de voz nativo.' });
+            setError('Tu navegador no soporta reconocimiento de voz nativo.');
+            setAppState('IDLE');
             return;
         }
 
@@ -469,7 +423,6 @@ const VoiceChat = () => {
         recognitionRef.current.maxAlternatives = 1;
 
         console.log(`[Mic] Recognition start (isRetry: ${isRetry})`);
-        logger.startPhase('transcription');
 
         recognitionRef.current.onresult = (e) => {
             const last = e.results.length - 1;
@@ -482,7 +435,7 @@ const VoiceChat = () => {
                 recognitionRef.current.stop();
                 handleQuery(text);
             } else {
-                dispatch({ type: 'UPDATE_TRANSCRIPT', payload: text });
+                setTranscript(text);
             }
         };
 
@@ -502,14 +455,14 @@ const VoiceChat = () => {
             }
 
             if (e.error !== 'no-speech') {
-                dispatch({ type: 'SET_ERROR', payload: `Reconocimiento: ${e.error}` });
-                logger.logError('VOICE_ERROR', 'NativeSpeech', e.error, null, {
+                setError(`Reconocimiento: ${e.error}`);
+                reportError('Mic', 'NativeSpeech', e.error, null, {
                     phase: 'NativeRecognition',
                     isRetry,
                     errorDetails: e.message || 'No details'
                 });
             }
-            dispatch({ type: 'RESET_IDLE' });
+            setAppState('IDLE');
         };
 
         recognitionRef.current.onend = () => {
@@ -517,7 +470,7 @@ const VoiceChat = () => {
             // GUARD: Only reset to IDLE if there's no query processing or lock active
             if (stateRef.current === 'LISTENING' && !isLocked.current && mountedRef.current) {
                 console.log('[Mic] Safe to reset to IDLE');
-                dispatch({ type: 'RESET_IDLE' });
+                setAppState('IDLE');
                 stopAnims();
             } else {
                 console.log('[Mic] Blocked reset to IDLE - Logic in transition or processing');
@@ -529,7 +482,7 @@ const VoiceChat = () => {
         } catch (e) {
             console.error('[Mic] Critical start failure:', e);
             if (!isRetry) startListening(true);
-            else dispatch({ type: 'RESET_IDLE' });
+            else setAppState('IDLE');
         }
     };
 
@@ -537,10 +490,35 @@ const VoiceChat = () => {
         if (recognitionRef.current) recognitionRef.current.stop();
         stopAnims();
         if (abortControllerRef.current) abortControllerRef.current.abort();
-        dispatch({ type: 'RESET_IDLE', force: true });
+        setAppState('IDLE');
     };
 
-    const reportError = (...args) => logger.logError(...args);
+    const reportError = async (type, module, message, stack = null, details = {}) => {
+        try {
+            const errorMetadata = {
+                userAgent: navigator.userAgent,
+                isSecure: window.isSecureContext,
+                screen: `${window.screen.width}x${window.screen.height}`,
+                language: navigator.language,
+                state: stateRef.current,
+                ...details
+            };
+
+            await fetch(`${API_BASE_URL}/api/report-error`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    type,
+                    module,
+                    message,
+                    stack,
+                    details: errorMetadata
+                })
+            });
+        } catch (e) {
+            console.warn('Could not report error to backend:', e.message);
+        }
+    };
 
     const getStateConfig = () => {
         switch (appState) {
@@ -598,7 +576,13 @@ const VoiceChat = () => {
             analyserRef.current.fftSize = 128;
 
             // 4. Solo tras éxito total, cambiar de vista
-            dispatch({ type: 'RESET_IDLE', force: true });
+            setAppState('IDLE');
+
+            // 📱 UX IMPROVEMENT: Auto-trigger voice if Tablet/Kiosk (reduced click)
+            if (isTabletOrKiosk.current) {
+                console.log('📱 Tablet/Kiosk detected — triggering auto-voice...');
+                startListening(false, true);
+            }
 
         } catch (e) {
             console.error('[Mic] Error crítico en activación:', e.message);
@@ -609,7 +593,8 @@ const VoiceChat = () => {
             });
 
             // Si falla, al menos dejamos entrar para escritura manual
-            dispatch({ type: 'SET_ERROR', payload: 'No pudimos activar el micrófono. Usando modo teclado.' });
+            setError('No pudimos activar el micrófono. Usando modo teclado.');
+            setAppState('IDLE');
         }
     };
 
@@ -662,12 +647,21 @@ const VoiceChat = () => {
                             <span className="text-[10px] text-white/40 uppercase tracking-widest"></span>
                         </div>
                     </div>
-                    <button
-                        onClick={() => setIsModalOpen(true)}
-                        className="w-12 h-12 flex items-center justify-center bg-white/5 border border-white/10 rounded-full hover:bg-white/10 transition-all text-xl shadow-lg"
-                    >
-                        ℹ️
-                    </button>
+                    <div className="flex gap-3">
+                        <button
+                            onClick={() => setIsGuideOpen(true)}
+                            className="flex items-center gap-2 px-4 h-12 bg-white/5 border border-white/10 rounded-full hover:bg-white/10 transition-all text-sm font-medium shadow-lg text-blue-300"
+                        >
+                            <span>💡</span>
+                            <span className="hidden md:inline">¿Cómo preguntar?</span>
+                        </button>
+                        <button
+                            onClick={() => setIsModalOpen(true)}
+                            className="w-12 h-12 flex items-center justify-center bg-white/5 border border-white/10 rounded-full hover:bg-white/10 transition-all text-xl shadow-lg"
+                        >
+                            ℹ️
+                        </button>
+                    </div>
                 </div>
 
                 {/* Main Content Area */}
@@ -683,6 +677,17 @@ const VoiceChat = () => {
                             </motion.div>
                             <h2 className={`text-6xl font-light mb-2 transition-colors duration-500 ${config.color}`}>{config.text}</h2>
                             <p className="text-white/40 text-2xl tracking-[0.2em] font-light">{config.subtext}</p>
+                            
+                            <ListeningProgressBar 
+                                isActive={appState === 'LISTENING'} 
+                                onTimeUp={() => {
+                                    if (recognitionRef.current) {
+                                        console.log('[Mic] Límite de tiempo alcanzado (Automático)');
+                                        recognitionRef.current.stop();
+                                    }
+                                }} 
+                                maxTime={10000} 
+                            />
                         </div>
                     ) : (
                         <>
@@ -710,7 +715,8 @@ const VoiceChat = () => {
                                     <button
                                         onClick={() => {
                                             if (synthRef.current) synthRef.current.cancel();
-                                            dispatch({ type: 'CLEAR_RESPONSE' });
+                                            setResponse('');
+                                            setAppState('IDLE');
                                         }}
                                         className="px-10 py-4 bg-white/10 hover:bg-white/20 active:scale-95 rounded-full text-white font-bold transition-all border border-white/10 flex items-center gap-3 shadow-xl group whitespace-nowrap"
                                     >
@@ -718,21 +724,19 @@ const VoiceChat = () => {
                                         <span className="bg-blue-600/40 px-3 py-1 rounded-full text-xs font-mono group-hover:bg-blue-600/60 transition-colors">{timeLeft}s</span>
                                     </button>
                                 </div>
+                                {/* IA Disclaimer Badge */}
+                                <div className="mt-4 flex justify-center">
+                                    <span className="px-2.5 py-1 bg-blue-500/10 border border-blue-500/25 rounded text-[10px] text-blue-300/60 font-bold uppercase tracking-widest">
+                                        ⚠ Asistente RRHH IA - Esta respuesta puede tener errores · Te recomendamos revisar la información importante. ⚠
+                                    </span>
+                                </div>
 
 
 
 
                             </motion.div>
 
-                            {/* IA Disclaimer Section - Moved OUTSIDE the main response box */}
-                            <div className="mt-6 p-4 bg-blue-500/5 backdrop-blur-md border border-white/5 rounded-2xl flex items-center gap-4 w-full max-w-2xl animate-in fade-in slide-in-from-bottom duration-700">
-                                <div className="w-8 h-8 flex-shrink-0 bg-blue-500/10 rounded-full flex items-center justify-center text-blue-400 text-xs shadow-inner">
-                                    ℹ️
-                                </div>
-                                <p className="text-[11px] leading-relaxed text-blue-100/40 uppercase tracking-widest font-medium">
-                                    La respuesta generada por la IA puede contener imprecisiones. Por favor, valide la información crítica.
-                                </p>
-                            </div>
+
                         </>
                     )}
                 </div>
@@ -844,7 +848,7 @@ const VoiceChat = () => {
                         <div className="bg-red-500/95 backdrop-blur-2xl text-white px-10 py-4 rounded-full shadow-4xl border border-red-400/40 flex items-center gap-4">
                             <span className="text-xl">⚠️</span>
                             <span className="font-bold tracking-wide">{error}</span>
-                            <button onClick={() => dispatch({ type: 'CLEAR_ERROR' })} className="ml-6 bg-white/10 px-3 py-1 rounded-full hover:bg-white/20 transition-colors">✕</button>
+                            <button onClick={() => setError(null)} className="ml-6 bg-white/10 px-3 py-1 rounded-full hover:bg-white/20 transition-colors">✕</button>
                         </div>
                     </motion.div>
                 )}
@@ -859,35 +863,151 @@ const VoiceChat = () => {
                         onClick={() => setIsModalOpen(false)}
                     >
                         <motion.div
-                            initial={{ scale: 0.9, y: 30 }} animate={{ scale: 1, y: 0 }}
-                            className="bg-[#1a2333]/90 border border-white/10 rounded-[3rem] p-12 max-w-4xl w-full shadow-4xl"
+                            initial={{ scale: 0.92, y: 30 }} animate={{ scale: 1, y: 0 }}
+                            className="bg-[#111827]/95 border border-white/10 rounded-[2.5rem] p-8 max-w-3xl w-full shadow-2xl flex flex-col max-h-[90vh]"
                             onClick={e => e.stopPropagation()}
                         >
-                            <h2 className="text-4xl text-white mb-10 font-light tracking-tight text-center">Temas de Consulta Frecuentes</h2>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                {[
-                                    { t: "Vacaciones y Días Libres", s: "¿Cuántos días tengo y cómo los pido?" },
-                                    { t: "Seguro de Gastos Médicos", s: "Cobertura y red de hospitales." },
-                                    { t: "Horarios y Turnos", s: "Flexibilidad y entrada/salida." },
-                                    { t: "Caja de Ahorro", s: "Préstamos y rendimientos." }
-                                ].map((topic, i) => (
-                                    <button
-                                        key={i}
-                                        onClick={() => { setIsModalOpen(false); handleQuery(topic.t); }}
-                                        className="group p-8 bg-white/5 hover:bg-blue-600/20 active:scale-95 rounded-3xl text-left transition-all border border-white/10 hover:border-blue-500/30"
-                                    >
-                                        <div className="text-2xl text-blue-200 group-hover:text-blue-400 font-bold mb-2 transition-colors">{topic.t}</div>
-                                        <div className="text-white/40 text-sm group-hover:text-white/60 transition-colors">{topic.s}</div>
-                                    </button>
-                                ))}
+                            {/* Header */}
+                            <div className="flex items-center justify-between mb-6 flex-shrink-0">
+                                <div className="flex items-center gap-3">
+                                    <div className="w-8 h-8 rounded-xl bg-blue-500/20 border border-blue-500/30 flex items-center justify-center text-base">📋</div>
+                                    <div>
+                                        <h2 className="text-lg text-white font-bold tracking-tight">Temas de Consulta</h2>
+                                        <p className="text-[10px] text-white/30 uppercase tracking-widest">Selecciona un tema para consultar</p>
+                                    </div>
+                                </div>
+                                <div className="flex items-center gap-3">
+                                    <span className="px-2 py-0.5 bg-blue-500/10 border border-blue-500/20 rounded text-[9px] text-blue-400 font-bold uppercase tracking-wider">10 temas</span>
+                                    <button onClick={() => setIsModalOpen(false)} className="w-8 h-8 flex items-center justify-center bg-white/5 hover:bg-white/10 border border-white/10 rounded-full text-white/40 hover:text-white transition-all text-sm">✕</button>
+                                </div>
                             </div>
-                            <div className="mt-12 text-center">
-                                <button onClick={() => setIsModalOpen(false)} className="px-12 py-4 bg-white/5 hover:bg-white/10 rounded-full text-white/60 transition-colors">Cerrar</button>
+
+                            {/* Topic Grid — scrollable */}
+                            <div className="overflow-y-auto custom-scrollbar pr-1">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    {[
+                                        { icon: '📄', color: 'blue', t: "Tipos de contratos y periodo de prueba", s: "Contrato fijo, indefinido, obra o labor y aprendizaje." },
+                                        { icon: '⏱', color: 'violet', t: "Periodo de prueba", s: "Duración máxima y condiciones aplicables." },
+                                        { icon: '🕐', color: 'sky', t: "Jornadas de trabajo y horarios", s: "Horas semanales, turnos y jornada flexible." },
+                                        { icon: '💼', color: 'amber', t: "Horas extras y recargos", s: "Trabajo nocturno, extra y dominical." },
+                                        { icon: '🏖', color: 'teal', t: "Descansos, vacaciones y permisos", s: "Días disponibles y cómo solicitarlos." },
+                                        { icon: '🏥', color: 'green', t: "Licencias legales", s: "Maternidad, paternidad, luto y parentales." },
+                                        { icon: '💰', color: 'emerald', t: "Salarios y dotación", s: "Forma de pago e igualdad salarial." },
+                                        { icon: '⚖️', color: 'orange', t: "Obligaciones y régimen disciplinario", s: "Deberes, faltas y sanciones." },
+                                        { icon: '🛡', color: 'red', t: "Acoso laboral y sexual", s: "Cómo denunciar y garantías de protección." },
+                                        { icon: '🤝', color: 'indigo', t: "Asuntos sindicales y fueros", s: "Tipos de sindicato y estabilidad reforzada." },
+                                    ].map((topic, i) => {
+                                        const palette = {
+                                            blue: { bg: 'bg-blue-500/10', border: 'border-blue-500/20', hover: 'hover:border-blue-400/40 hover:bg-blue-500/15', icon: 'bg-blue-500/20 text-blue-300', title: 'group-hover:text-blue-300' },
+                                            violet: { bg: 'bg-violet-500/10', border: 'border-violet-500/20', hover: 'hover:border-violet-400/40 hover:bg-violet-500/15', icon: 'bg-violet-500/20 text-violet-300', title: 'group-hover:text-violet-300' },
+                                            sky: { bg: 'bg-sky-500/10', border: 'border-sky-500/20', hover: 'hover:border-sky-400/40 hover:bg-sky-500/15', icon: 'bg-sky-500/20 text-sky-300', title: 'group-hover:text-sky-300' },
+                                            amber: { bg: 'bg-amber-500/10', border: 'border-amber-500/20', hover: 'hover:border-amber-400/40 hover:bg-amber-500/15', icon: 'bg-amber-500/20 text-amber-300', title: 'group-hover:text-amber-300' },
+                                            teal: { bg: 'bg-teal-500/10', border: 'border-teal-500/20', hover: 'hover:border-teal-400/40 hover:bg-teal-500/15', icon: 'bg-teal-500/20 text-teal-300', title: 'group-hover:text-teal-300' },
+                                            green: { bg: 'bg-green-500/10', border: 'border-green-500/20', hover: 'hover:border-green-400/40 hover:bg-green-500/15', icon: 'bg-green-500/20 text-green-300', title: 'group-hover:text-green-300' },
+                                            emerald: { bg: 'bg-emerald-500/10', border: 'border-emerald-500/20', hover: 'hover:border-emerald-400/40 hover:bg-emerald-500/15', icon: 'bg-emerald-500/20 text-emerald-300', title: 'group-hover:text-emerald-300' },
+                                            orange: { bg: 'bg-orange-500/10', border: 'border-orange-500/20', hover: 'hover:border-orange-400/40 hover:bg-orange-500/15', icon: 'bg-orange-500/20 text-orange-300', title: 'group-hover:text-orange-300' },
+                                            red: { bg: 'bg-red-500/10', border: 'border-red-500/20', hover: 'hover:border-red-400/40 hover:bg-red-500/15', icon: 'bg-red-500/20 text-red-300', title: 'group-hover:text-red-300' },
+                                            indigo: { bg: 'bg-indigo-500/10', border: 'border-indigo-500/20', hover: 'hover:border-indigo-400/40 hover:bg-indigo-500/15', icon: 'bg-indigo-500/20 text-indigo-300', title: 'group-hover:text-indigo-300' },
+                                        };
+                                        const p = palette[topic.color];
+                                        return (
+                                            <button
+                                                key={i}
+                                                onClick={() => { setIsModalOpen(false); handleQuery(topic.t); }}
+                                                className={`group flex items-start gap-4 p-5 ${p.bg} ${p.border} ${p.hover} active:scale-95 rounded-2xl text-left transition-all duration-200 border`}
+                                            >
+                                                <div className={`w-9 h-9 flex-shrink-0 rounded-xl flex items-center justify-center text-base ${p.icon}`}>
+                                                    {topic.icon}
+                                                </div>
+                                                <div className="min-w-0">
+                                                    <div className={`text-sm text-white/80 font-semibold mb-0.5 leading-snug transition-colors ${p.title}`}>{topic.t}</div>
+                                                    <div className="text-[11px] text-white/30 group-hover:text-white/50 transition-colors leading-relaxed">{topic.s}</div>
+                                                </div>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
                             </div>
                         </motion.div>
                     </motion.div>
                 )}
             </AnimatePresence>
+
+            {/* Administrador PIN Modal */}
+            <AnimatePresence>
+                {showPinModal && (
+                    <motion.div
+                        initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                        className="fixed inset-0 z-[300] flex items-center justify-center p-6 bg-black/80 backdrop-blur-2xl"
+                        onClick={() => setShowPinModal(false)}
+                    >
+                        <motion.div
+                            initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }}
+                            className="bg-[#1a2333] border border-white/10 rounded-[2.5rem] p-10 max-w-md w-full shadow-4xl text-center"
+                            onClick={e => e.stopPropagation()}
+                        >
+                            <div className="mb-8">
+                                <div className="w-20 h-20 bg-blue-500/20 rounded-full flex items-center justify-center text-3xl mx-auto mb-4 border border-blue-500/30">
+                                    🔐
+                                </div>
+                                <h2 className="text-2xl font-bold text-white">Acceso Restringido</h2>
+                                <p className="text-white/40 mt-2">Ingresa el PIN para acceder al Dashboard Admin</p>
+                            </div>
+
+                            <form onSubmit={async (e) => {
+                                e.preventDefault();
+                                const pinInput = e.target.pin.value;
+                                try {
+                                    const res = await fetch(`${API_BASE_URL}/api/verify-pin`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ pin: pinInput })
+                                    });
+                                    const data = await res.json();
+                                    if (data.success) {
+                                        window.open('/?dashboard=true', '_blank');
+                                        setShowPinModal(false);
+                                    } else {
+                                        alert('PIN Incorrecto. Intenta de nuevo.');
+                                        e.target.pin.value = '';
+                                    }
+                                } catch (err) {
+                                    console.error('Error verificando PIN:', err);
+                                    alert('Error de conexión con el servidor.');
+                                }
+                            }}>
+                                <input
+                                    name="pin"
+                                    type="password"
+                                    autoFocus
+                                    inputMode="numeric"
+                                    maxLength={4}
+                                    placeholder="••••"
+                                    className="w-full bg-black/40 border border-white/10 rounded-2xl py-6 text-4xl text-center tracking-[1em] text-blue-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all mb-6 placeholder:text-white/5"
+                                />
+                                <div className="grid grid-cols-2 gap-4">
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowPinModal(false)}
+                                        className="py-4 bg-white/5 hover:bg-white/10 rounded-xl text-white/60 font-medium transition-all"
+                                    >
+                                        Cancelar
+                                    </button>
+                                    <button
+                                        type="submit"
+                                        className="py-4 bg-blue-600 hover:bg-blue-500 rounded-xl text-white font-bold transition-all shadow-lg shadow-blue-600/20"
+                                    >
+                                        Validar
+                                    </button>
+                                </div>
+                            </form>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* Guía de cómo preguntar */}
+            <HelpGuide isOpen={isGuideOpen} onClose={() => setIsGuideOpen(false)} />
         </div >
     );
 };

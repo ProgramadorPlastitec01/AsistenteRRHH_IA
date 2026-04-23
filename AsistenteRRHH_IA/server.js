@@ -17,8 +17,14 @@ import 'dotenv/config';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import os from 'os';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
 import fs from 'fs';
 import path from 'path';
+
+// --- NUEVOS SERVICIOS DE CACHÉ Y PRIVACIDAD ---
+import DatabaseService from './services/database.js';
+import PrivacyService, { CATEGORIES } from './services/privacy.js';
 import multer from 'multer';
 
 // Multer is not longer needed as Whisper was removed
@@ -28,6 +34,20 @@ const app = express();
 const PORT = 3000;
 const LOG_FILE = path.join(process.cwd(), 'analytics.jsonl');
 const ERRORS_FILE = path.join(process.cwd(), 'errors.jsonl');
+
+// ── PIN Admin (almacenado sólo en backend, nunca expuesto) ──
+// Hash simple: btoa de la cadena invertida + salt fijo
+const ADMIN_PIN_HASH = 'NzEyMl9wbGFzdGl0ZWM='; // btoa('2217' reverse + '_plastitec') -> btoa('7122_plastitec')
+const verifyPin = (input) => {
+    try {
+        const reversed = [...String(input)].reverse().join('');
+        return btoa(`${reversed}_plastitec`) === ADMIN_PIN_HASH;
+    } catch (e) { return false; }
+};
+
+// Auth error pattern used in the query retry logic
+// Defined at module level to ensure availability in all closures
+const AUTH_ERROR_RE = /\b(Authentication expired|re-authenticate|session expired|login required|401)\b/i;
 
 /**
  * Helper to log analytics events to JSONL file
@@ -95,6 +115,139 @@ let authWatcherActive = false; // Prevents duplicate fs.watch listeners across i
 let mcpClient = null;
 let notebookId = null;
 let isInitialized = false;
+
+// ── Knowledge Version — sistema de revalidación inteligente ──
+// Persiste entre reinicios del servidor en el archivo knowledge_version.json
+const KV_FILE = path.join(process.cwd(), 'knowledge_version.json');
+let knowledgeVersion = (() => {
+    try {
+        if (fs.existsSync(KV_FILE)) {
+            const data = JSON.parse(fs.readFileSync(KV_FILE, 'utf8'));
+            return data.version || 0;
+        }
+    } catch (e) { /* archivo corregido en próximo bump */ }
+    return 0;
+})();
+console.log(`📚 Knowledge Version cargada: v${knowledgeVersion}`);
+
+/**
+ * Limpia y parsea avanzado: Extrae el texto de la respuesta si la IA devuelve una estructura JSON
+ * o tiene ruido de citas/caracteres especiales.
+ * 
+ * @param {string} text Texto crudo de la IA o de la caché
+ * @returns {string} Texto limpio listo para el usuario
+ */
+const cleanResponse = (text) => {
+    if (!text) return "";
+    let processed = text;
+
+    // 1. Intenta parsear directamente (si es un JSON puro)
+    try {
+        const parsed = JSON.parse(text);
+        if (parsed.answer) return String(parsed.answer);
+        if (parsed.response) return String(parsed.response);
+    } catch (e) {
+        // 2. Si falla, intenta buscar un bloque JSON contenido dentro del texto usando Regex
+        try {
+            const jsonMatch = text.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                const parsed = JSON.parse(jsonMatch[0]);
+                if (parsed.answer) return String(parsed.answer);
+                if (parsed.response) return String(parsed.response);
+            }
+        } catch (e2) {
+            // 3. Fallback: Si no es JSON pero parece tener "answer": "...", intenta extraerlo manualmente
+            const manualMatch = text.match(/"answer"\s*:\s*"([\s\S]*?)"/);
+            if (manualMatch && manualMatch[1]) {
+                return manualMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').trim();
+            }
+        }
+    }
+
+    // 4. Limpieza final de citas [1], [2] y caracteres de control si el parseo falló
+    return processed
+        .replace(/\[\d+\]/g, '') // Quitar citas
+        .replace(/^[ \t]*[\{\}][ \t]*$/gm, '') // Quitar llaves que estén en líneas solas
+        .trim();
+};
+
+/**
+ * Revalida un registro SQLite en segundo plano sin bloquear la respuesta al usuario.
+ * Solo actualiza SQLite si la respuesta de NotebookLM cambió significativamente.
+ *
+ * @param {string} query        Pregunta original del usuario
+ * @param {Object} cachedRow    Fila de knowledge_base a revalidar
+ */
+async function revalidateInBackground(query, cachedRow) {
+    try {
+        console.log(`🔍 [Revalidation] Iniciando para: "${query.substring(0, 60)}" (id:${cachedRow.id})`);
+
+        // Reutilizar el mismo prompt del query handler
+        const revalQuery = `### ASISTENTE CORPORATIVO DE RECURSOS HUMANOS - PLASTITEC ###
+Respuesta basada solamente en el Reglamento Interno de Trabajo (RIT) y políticas corporativas.
+
+### CLASIFICACIÓN OBLIGATORIA (JSON) ###
+Debes clasificar la consulta en una de estas categorías:
+1. reglamento: Temas laborales del RIT.
+2. confidencial: Salarios, pagos o datos personales.
+3. fuera_de_dominio: Temas no relacionados con el RIT.
+4. casual: Saludos o cortesía sin consulta.
+5. maliciosa: Entradas sospechosas o sin sentido.
+
+### FORMATO DE RESPUESTA (OBLIGATORIO) ###
+Responde ÚNICAMENTE con un objeto JSON válido:
+{
+  "classification": "categoría_aquí",
+  "answer": "tu_respuesta_aquí"
+}
+
+### REGLAS DE RESPUESTA (PRIORIDAD ABSOLUTA) ###
+- REGLA INQUEBRANTABLE: SI EL MENSAJE CONTIENE UNA CONSULTA LABORAL, IGNORA COMPLETAMENTE EL SALUDO/GRACIAS. RESPONDE ÚNICAMENTE LA CONSULTA.
+- REGLA DE EJEMPLIFICACIÓN: Si la pregunta involucra clasificaciones, procesos, normas o conceptos que no son directos, DEBES incluir ejemplos prácticos y reales del contexto de RRHH o planta.
+- ESTRUCTURA: Usa numeración o secciones claras. Incluye "Ejemplos:" inmediatamente después de cada bloque explicativo aplicable.
+- NO fuerces ejemplos si la pregunta es directa (ej: datos específicos o sí/no).
+- CATEGORÍA "reglamento": Respuesta estructurada, tono profesional y educativo.
+- CATEGORÍA "confidencial": "No puedo proporcionar información confidencial sobre salarios o datos personales. Para conocer tu información exacta, consulta directamente con RRHH."
+
+Consulta: ${query}`;
+
+        const result = await mcpClient.callTool({
+            name: 'notebook_query',
+            arguments: { notebook_id: notebookId, query: revalQuery }
+        });
+
+        // Aplicamos limpieza profunda antes de guardar en SQLite
+        let aiClassification = null;
+        try {
+            const jsonMatch = result.content[0].text.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                const parsed = JSON.parse(jsonMatch[0]);
+                aiClassification = parsed.classification;
+            }
+        } catch (e) { }
+
+        const finalCategory = PrivacyService.classify(query, aiClassification);
+        const newAnswer = cleanResponse(result.content[0].text);
+
+        // --- REGLA CRÍTICA: Si ya no es RIT, eliminar de la base ---
+        if (finalCategory !== CATEGORIES.REGLAMENTO) {
+            console.warn(`🗑️ [Revalidation] Registro id:${cachedRow.id} ya no pertenece al RIT (Categoría: ${finalCategory}). ELIMINANDO...`);
+            await DatabaseService.delete(cachedRow.id);
+            return;
+        }
+
+        if (DatabaseService.hasSignificantChange(cachedRow.answer, newAnswer)) {
+            await DatabaseService.markRevalidated(cachedRow.id, newAnswer, knowledgeVersion);
+            console.log(`✅ [Revalidation] Registro id:${cachedRow.id} ACTUALIZADO con nueva respuesta.`);
+            logAnalyticsEvent('RevalidationUpdated', { id: cachedRow.id, query });
+        } else {
+            await DatabaseService.markRevalidated(cachedRow.id, null, knowledgeVersion);
+            console.log(`✔ [Revalidation] Registro id:${cachedRow.id} sin cambios significativos — solo versión actualizada.`);
+        }
+    } catch (err) {
+        console.warn(`⚠️ [Revalidation] Error en background para id:${cachedRow.id}: ${err.message}`);
+    }
+}
 
 /**
  * Initialize MCP connection and find RRHH notebook
@@ -165,17 +318,17 @@ async function initializeMCP() {
             console.log(`Found RRHH notebook ID: ${notebookId}`);
         }
 
-        // Configure chat settings for shorter, more specific responses
+        // Configure chat settings for balanced responses
         try {
             await mcpClient.callTool({
                 name: 'chat_configure',
                 arguments: {
                     notebook_id: notebookId,
-                    response_length: 'shorter',
+                    response_length: 'medium', // Adjusted to 'medium' for balance
                     goal: 'default'
                 }
             });
-            console.log('Chat configured for shorter responses');
+            console.log('Chat configured for balanced responses');
         } catch (configError) {
             console.warn('Could not configure chat settings, continuing with defaults:', configError.message);
         }
@@ -198,46 +351,29 @@ async function initializeMCP() {
         notebookId = 'DEMO_MODE';
     }
 
-    // Start periodic background auth refresh with safety timeout
+    // Start periodic background auth refresh
     if (authRefreshInterval) clearInterval(authRefreshInterval);
     authRefreshInterval = setInterval(async () => {
         try {
             console.log('🔄 Performing background session refresh...');
             if (mcpClient) {
-                // Use a promise race to prevent the interval from hanging the event loop
-                const refreshPromise = mcpClient.callTool({ name: 'refresh_auth', arguments: {} });
-                const timeoutPromise = new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error('Refresh auth timeout (30s)')), 30000)
-                );
-
-                await Promise.race([refreshPromise, timeoutPromise]);
+                await mcpClient.callTool({ name: 'refresh_auth', arguments: {} });
                 console.log('✅ Session refreshed successfully in background');
             }
         } catch (e) {
-            console.warn('⚠️ Passive session refresh failed or timed out:', e.message);
+            console.warn('⚠️ Passive session refresh failed (will retry next cycle):', e.message);
         }
     }, SESSION_REFRESH_INTERVAL);
 
-    // Watch for manual auth.json changes to auto-reload
-    // Guard flag prevents registering multiple watchers on successive calls to initializeMCP()
-    if (fs.existsSync(AUTH_FILE_PATH) && !authWatcherActive) {
-        authWatcherActive = true;
-        fs.watch(AUTH_FILE_PATH, async (eventType) => {
-            if (eventType === 'change') {
-                console.log('🔄 auth.json change detected. Re-initializing MCP...');
-                if (mcpClient) {
-                    try { await mcpClient.close(); } catch (e) { }
-                    isInitialized = false;
-                    await initializeMCP();
-                }
-            }
-        });
+    // Initialize SQLite Database
+    try {
+        await DatabaseService.init();
+        console.log('✅ SQLite Cache Database Initialized successfully');
+    } catch (dbError) {
+        console.warn('⚠️ SQLite Cache could not be initialized:', dbError.message);
     }
 }
 
-/**
- * Health check endpoint
- */
 app.get('/api/health', (req, res) => {
     res.json({
         status: isInitialized ? 'ready' : 'initializing',
@@ -247,10 +383,81 @@ app.get('/api/health', (req, res) => {
 });
 
 /**
+ * Verify Admin PIN
+ */
+app.post('/api/verify-pin', (req, res) => {
+    const { pin } = req.body;
+    if (!pin) return res.status(400).json({ success: false, error: 'PIN requerido' });
+
+    if (verifyPin(pin)) {
+        console.log('🔓 [Security] PIN verificado con éxito');
+        res.json({ success: true });
+    } else {
+        console.warn('🔒 [Security] Intento de acceso fallido con PIN:', pin);
+        res.json({ success: false, error: 'PIN incorrecto' });
+    }
+});
+
+/**
+ * Knowledge Version — GET
+ * Retorna la versión actual del Knowledge Base y estadísticas de revalidación.
+ */
+app.get('/api/knowledge-version', async (req, res) => {
+    try {
+        const stale = await DatabaseService.getStaleRecords(knowledgeVersion, 1000);
+        res.json({
+            version: knowledgeVersion,
+            staleRecords: stale.length,
+            message: stale.length > 0
+                ? `${stale.length} registro(s) pendiente(s) de revalidación`
+                : 'Base de conocimiento al día'
+        });
+    } catch (e) {
+        res.json({ version: knowledgeVersion, staleRecords: 0 });
+    }
+});
+
+/**
+ * Bump Knowledge Version — POST
+ * Incrementa la versión del Knowledge Base.
+ * Llamar cada vez que se agrega o actualiza una fuente en NotebookLM.
+ * Esto marca todos los registros actuales para revalidación automática en background.
+ */
+app.post('/api/bump-knowledge-version', async (req, res) => {
+    try {
+        knowledgeVersion += 1;
+
+        // Persistir en disco para sobrevivir reinicios del servidor
+        fs.writeFileSync(KV_FILE, JSON.stringify({
+            version: knowledgeVersion,
+            updatedAt: new Date().toISOString()
+        }), 'utf8');
+
+        // Contar cuántos registros quedan desactualizados
+        const stale = await DatabaseService.getStaleRecords(knowledgeVersion, 1000);
+
+        console.log(`📚 [KnowledgeVersion] Bumped a v${knowledgeVersion}. Registros a revalidar: ${stale.length}`);
+        logAnalyticsEvent('KnowledgeVersionBumped', { version: knowledgeVersion, staleCount: stale.length });
+
+        res.json({
+            success: true,
+            version: knowledgeVersion,
+            staleRecords: stale.length,
+            message: `Knowledge Base actualizado a v${knowledgeVersion}. ${stale.length} registro(s) se revalidarán automáticamente en background.`
+        });
+    } catch (error) {
+        console.error('Error bumping knowledge version:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+
+/**
  * Analytics Endpoint
  * Receives logs from frontend interactions (local cache hits, intents, etc.)
  */
 app.post('/api/analytics', (req, res) => {
+
     const { type, data } = req.body;
     if (!type) return res.status(400).json({ error: 'Missing log type' });
 
@@ -403,6 +610,32 @@ app.get('/api/system-status', async (req, res) => {
 });
 
 /**
+ * Valida si una respuesta de la IA es negativa o indica falta de información
+ */
+const isResponseInvalid = (text) => {
+    const invalidMarkers = [
+        "no encuentro información",
+        "no tengo acceso",
+        "base de conocimientos actual",
+        "no se menciona",
+        "no tengo datos",
+        "no tengo información disponible",
+        "lo siento, no encuentro",
+        "lo siento, no tengo",
+        "no answer received"
+    ];
+    const lowerText = text.toLowerCase();
+    return invalidMarkers.some(marker => lowerText.includes(marker));
+};
+
+/**
+ * Reformula una consulta para mejorar la probabilidad de encontrar información
+ */
+const reformulateQuery = (originalQuery) => {
+    return `Respuesta directa y humana sobre: "${originalQuery}", consultando exclusivamente el Reglamento Interno de Trabajo y políticas de PLASTITEC. Sin introducciones.`;
+};
+
+/**
  * Query endpoint - Main interface for frontend
  */
 app.post('/api/query', async (req, res) => {
@@ -424,57 +657,124 @@ app.post('/api/query', async (req, res) => {
 
         console.log(`Processing query: "${query}"`);
 
+        // --- FILTRO DE PRIVACIDAD PREVENTIVO (ORDEN DE PRIORIDAD OBLIGATORIO) ---
+        // Se evalúa ANTES de consultar el reglamento o la caché.
+        if (PrivacyService.classify(query) === CATEGORIES.CONFIDENCIAL) {
+            console.log('🛡️ [Privacy Guard] Bloqueo preventivo: Pregunta detectada como sensible.');
+            return res.json({
+                response: "No puedo proporcionar información confidencial sobre salarios o datos personales.\nPara conocer tu información exacta, consulta directamente con RRHH.",
+                outOfScope: true,
+                securityBlocked: true
+            });
+        }
+
+        // --- PASO 0: Clasificación LOCAL PREVIA ---
+        const localCategory = PrivacyService.classify(query);
+
+        // --- PASO 1: Búsqueda en Caché Local (SOLO si es del RIT) ---
+        if (localCategory === CATEGORIES.REGLAMENTO) {
+            try {
+                const cachedResult = await DatabaseService.findSimilar(query);
+                if (cachedResult) {
+                    const cacheType = cachedResult.question_normalized === DatabaseService.normalize(query)
+                        ? 'exacta'
+                        : 'similar';
+
+                    // Verificar si necesita revalidación en background
+                    const shouldRevalidate = DatabaseService.needsRevalidation(cachedResult, knowledgeVersion);
+                    if (shouldRevalidate && mcpClient && notebookId !== 'DEMO_MODE') {
+                        console.log(`🔄 [Revalidation] Revalidación pendiente para id:${cachedResult.id} — ejecutando en background...`);
+                        setImmediate(() => revalidateInBackground(query, cachedResult));
+                    }
+
+                    // AHORA: incrementUsage es manual tras confirmar que sigue siendo reglamento
+                    await DatabaseService.incrementUsage(cachedResult.id);
+
+                    console.log(`🚀 [SQLite Cache Hit] Coincidencia ${cacheType} — uso #${cachedResult.usage_count + 1}${shouldRevalidate ? ' (revalidando en BG)' : ''}`);
+
+                    const cleanCachedAnswer = cleanResponse(cachedResult.answer);
+
+                    return res.json({
+                        response: cleanCachedAnswer,
+                        outOfScope: false,
+                        cached: true,
+                        cacheSource: 'sqlite',
+                        revalidating: shouldRevalidate,
+                        conversationId: conversationId || 'cached-session'
+                    });
+                }
+            } catch (cacheError) {
+                console.error('⚠️ Error al buscar en caché SQLite:', cacheError.message);
+            }
+        } else {
+            console.log(`ℹ️ [Query] Clasificación local: ${localCategory}. Saltando caché SQLite.`);
+        }
+
         // FALLBACK: If in Demo Mode, return simulated responses
         if (notebookId === 'DEMO_MODE') {
             const lowerQuery = query.toLowerCase();
             let simulatedResponse = 'Lo siento, no encuentro esa información en mi base de conocimientos actual. Por favor, contacta con RRHH.';
 
-            if (lowerQuery.includes('vacaciones')) simulatedResponse = 'Tienes derecho a 22 días de vacaciones. Regístralas en el portal de empleados.';
-            if (lowerQuery.includes('pago') || lowerQuery.includes('nómina')) simulatedResponse = 'La nómina se paga el último viernes de cada mes.';
-            if (lowerQuery.includes('horario')) simulatedResponse = 'El horario es de 9:00 a 18:00, de lunes a viernes.';
+            if (lowerQuery.includes('horario')) simulatedResponse = 'El horario de oficina es de lunes a viernes, de 8:00 AM a 5:30 PM.';
+            if (lowerQuery.includes('vacaciones')) simulatedResponse = 'Tienes derecho a 15 días hábiles de vacaciones por año laborado.';
+            if (lowerQuery.includes('pago')) simulatedResponse = 'La nómina se paga los días 15 y 30 de cada mes.';
+
+            // --- PROCESAMIENTO DE CACHÉ PARA DEMO_MODE ---
+            // Solo para consistencia en modo demo interno si se desea, 
+            // pero normalmente se desactiva para no llenar la DB con basura.
+            /* 
+            const isSafe = PrivacyService.isSafeToCache(query, simulatedResponse);
+            if (isSafe) {
+                await DatabaseService.store(query, simulatedResponse, 'general');
+            }
+            */
 
             return res.json({
-                response: simulatedResponse, // Clean response for demo
-                outOfScope: false
+                response: simulatedResponse,
+                outOfScope: false,
+                simulated: true
             });
         }
 
-        // B1 FIX/REFINEMENT: Apply strict constraints to force direct, grounded responses.
-        const enhancedQuery = `--------------------------------------------------
-INSTRUCCIONES CRÍTICAS PARA LA IA
---------------------------------------------------
-1. Responde únicamente a lo que se pregunta.
-2. Usa solo información encontrada en NotebookLM.
-3. No agregues explicaciones adicionales.
-4. No describas los documentos consultados.
-5. No expliques el proceso de búsqueda.
-6. No agregues interpretaciones propias.
-7. No amplíes la respuesta con contexto innecesario.
-8. Si la información no existe en NotebookLM, responde exactamente:
-   "No se encontró información relacionada en los documentos disponibles."
-
-FORMATO DE RESPUESTA OBLIGATORIO:
-- Un único bloque de respuesta.
-- Máximo 1–2 párrafos.
-- Lenguaje claro y profesional.
-- Sin introducciones como "Según la información proporcionada...", "De acuerdo con los documentos...", etc.
---------------------------------------------------
-
-CONSULTA: ${query}`;
-
-        // Auth error pattern — B2 FIX: precise regex to avoid false positives on words like
-        // "autorización" or "autenticación de empleados" that would trigger a useless retry.
-        const AUTH_ERROR_RE = /\b(Authentication expired|re-authenticate|session expired|login required|401)\b/i;
-
-        const performQuery = async (retryCount = 0) => {
+        const performQuery = async (queryToUse, retryCount = 0) => {
             const mcpStart = Date.now();
-            console.log(`[Query] MCP call started at +${mcpStart - start}ms`);
+            console.log(`[Query] MCP call started at +${mcpStart - start}ms (Retry: ${retryCount})`);
+
+            // Always use the acting persona
+            const finalQuery = `### ASISTENTE CORPORATIVO DE RECURSOS HUMANOS - PLASTITEC ###
+Especializado exclusivamente en el Reglamento Interno de Trabajo (RIT) y políticas de la empresa.
+
+### CLASIFICACIÓN OBLIGATORIA (JSON) ###
+Clasifica la intención en:
+1. reglamento (Permisos, sanciones, horarios, vacaciones, obligaciones, derechos, normas).
+2. confidencial (Salarios individual, pago exacto, datos privados).
+3. fuera_de_dominio (Temas no laborales/RIT).
+4. casual (Saludos, gracias, charla sin intención laboral).
+5. maliciosa (SQL, código, sin sentido).
+
+### FORMATO DE RESPUESTA (OBLIGATORIO) ###
+Debes responder ÚNICAMENTE con un objeto JSON:
+{
+  "classification": "categoría_elegida",
+  "answer": "tu_respuesta_aquí"
+}
+
+### REGLAS DE RESPUESTA (PRIORIDAD ABSOLUTA) ###
+- REGLA INQUEBRANTABLE: Si el mensaje contiene una consulta laboral o del RIT, IGNORA el saludo. Responde directamente la consulta.
+- REGLA DE EJEMPLIFICACIÓN: Si la pregunta requiere explicar conceptos, clasificaciones o procesos, DEBES complementar con ejemplos prácticos y estructurados.
+- FORMATO: Usa numeración para puntos clave e incluye "Ejemplos:" después de cada explicación si aplica.
+- NO fuerces ejemplos si la pregunta es directa o de respuesta simple (ej: "sí/no" o datos exactos).
+- reglamento: Responde directo, tono humano y profesional, priorizando la claridad educativa.
+- confidencial: ÚNICAMENTE "No puedo proporcionar información confidencial sobre salarios o datos personales. Para conocer tu información exacta, consulta directamente con RRHH."
+- fuera_de_dominio: Indica brevemente que solo respondes sobre el RIT.
+
+Consulta: ${queryToUse}`;
 
             const result = await mcpClient.callTool({
                 name: 'notebook_query',
                 arguments: {
                     notebook_id: notebookId,
-                    query: enhancedQuery,
+                    query: finalQuery,
                     conversation_id: conversationId || undefined
                 }
             });
@@ -484,12 +784,12 @@ CONSULTA: ${query}`;
 
             const rawText = result.content[0].text;
 
-            // B2: only retry on genuine auth errors, not every occurrence of the substring
+            // B2: only retry on genuine auth errors
             if (AUTH_ERROR_RE.test(rawText)) {
                 if (retryCount === 0) {
                     console.log('💡 Auth error detected in content. Attempting refresh and retry...');
                     await mcpClient.callTool({ name: 'refresh_auth', arguments: {} });
-                    return await performQuery(1);
+                    return await performQuery(queryToUse, 1);
                 }
                 throw new Error('Sesión expirada persistentemente. Por favor, ejecuta "npx notebooklm-mcp-server auth".');
             }
@@ -500,32 +800,49 @@ CONSULTA: ${query}`;
             };
         };
 
-        const { text: rawText, conversationId: finalConversationId } = await performQuery();
-        const backendTotal = Date.now() - start;
-        console.log(`[Query] ✅ Complete. Backend total: ${backendTotal}ms`);
-
+        // --- FIRST ATTEMPT ---
+        let { text: rawText, conversationId: finalConversationId } = await performQuery(query);
         let responseText = rawText;
         let finalId = finalConversationId;
 
-        // Intentar parsear si el resultado es un JSON string
+        // Limpieza y parseo avanzado (Extrae texto de JSON si NotebookLM responde con estructura)
+        let aiClassification = null;
         try {
-            const parsed = JSON.parse(rawText);
-            if (parsed.answer) responseText = parsed.answer;
-            if (parsed.conversation_id) finalId = parsed.conversation_id;
-        } catch (e) { }
+            // Buscamos si el texto es o contiene un JSON
+            const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                const parsed = JSON.parse(jsonMatch[0]);
+                if (parsed.classification) aiClassification = parsed.classification;
+                // Si viene "answer", actualizamos responseText a solo ese valor
+                if (parsed.answer) responseText = parsed.answer;
+            }
+        } catch (e) {
+            console.warn('⚠️ No se pudo extraer clasificación JSON del backend:', e.message);
+        }
 
-        // Limpieza básica (eliminando referencias estilo [1], [2])
-        responseText = responseText
-            .replace(/\[\d+\]/g, '')
-            .trim();
+        responseText = cleanResponse(responseText);
 
-        // Check if out of scope or not found
-        const isNotFound = responseText.includes("No se encontró información relacionada en los documentos disponibles");
+        // --- SEGUNDA CAPA DE SEGURIDAD: PrivacyService con clasificación de IA ---
+        const finalCategory = PrivacyService.classify(query, aiClassification);
+        const finalIsInvalid = (finalCategory !== 'reglamento');
 
-        if (isNotFound) {
+        const backendTotal = Date.now() - start;
+        console.log(`[Query] ✅ Complete. Category: ${finalCategory} | Backend total: ${backendTotal}ms`);
+
+        // --- PASO 2: Persistencia SELECTIVA en SQLite ---
+        if (!finalIsInvalid && !notebookId.includes('DEMO')) {
+            const saveResult = await DatabaseService.storeOrUpdate(query, responseText, 'general', 'notebooklm', knowledgeVersion);
+            console.log(`💾 [SQLite] Intento de guardado (Categoría: ${finalCategory}) -> ${saveResult}`);
+        } else {
+            console.log(`ℹ️ [SQLite] No guardado - Categoría: ${finalCategory}${notebookId.includes('DEMO') ? ' (DEMO_MODE)' : ''}`);
+        }
+
+        if (finalIsInvalid) {
             return res.json({
                 response: responseText,
-                outOfScope: true,
+                outOfScope: finalCategory === 'fuera_de_dominio',
+                securityBlocked: finalCategory === 'confidencial' || finalCategory === 'maliciosa',
+                category: finalCategory,
                 conversationId: finalId
             });
         }
