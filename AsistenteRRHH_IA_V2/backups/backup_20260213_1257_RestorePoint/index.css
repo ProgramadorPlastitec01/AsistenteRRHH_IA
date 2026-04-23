@@ -1,0 +1,173 @@
+@import "tailwindcss";
+
+@theme {
+  /* Paleta Alegre: Navy (#233969) + White con luminosidad */
+  --color-primary-50: #f0f7ff;
+  --color-primary-100: #e0eeff;
+  --color-primary-200: #bad9ff;
+  --color-primary-300: #7eb6ff;
+  --color-primary-400: #4a8fff;
+  --color-primary-500: #233969;
+  /* Navy Base */
+  --color-primary-600: #3b66cc;
+  /* Alegre Navy Highlight */
+  --color-primary-700: #2c4da6;
+  --color-primary-800: #1a2b4f;
+  --color-primary-900: #0d1426;
+
+  --color-accent: #ffffff;
+
+  --animate-pulse-slow: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-bounce-slow: bounce 2s infinite;
+
+  @keyframes meow {
+
+    0%,
+    100% {
+      transform: translateX(-50%) scaleY(1);
+    }
+
+    50% {
+      transform: translateX(-50%) scaleY(1.8);
+    }
+  }
+
+  --animate-meow: meow 0.15s ease-in-out infinite;
+
+  @keyframes wiggle-left {
+
+    0%,
+    100% {
+      transform: rotate(0deg);
+    }
+
+    50% {
+      transform: rotate(-10deg);
+    }
+  }
+
+  @keyframes wiggle-right {
+
+    0%,
+    100% {
+      transform: rotate(0deg);
+    }
+
+    50% {
+      transform: rotate(10deg);
+    }
+  }
+
+  --animate-wiggle-left: wiggle-left 0.3s ease-in-out infinite;
+  --animate-wiggle-right: wiggle-right 0.3s ease-in-out infinite;
+
+  @keyframes thinking-look-up {
+
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+
+    50% {
+      transform: translateY(-5px);
+    }
+  }
+
+  @keyframes paw-to-ear {
+    0% {
+      transform: translate(0, 0) rotate(0);
+    }
+
+    100% {
+      transform: translate(-20px, -80px) rotate(-15deg);
+    }
+  }
+
+  @keyframes head-tilt {
+    0% {
+      transform: rotate(0);
+    }
+
+    100% {
+      transform: rotate(5deg);
+    }
+  }
+
+  @keyframes pensive-whiskers {
+
+    0%,
+    100% {
+      transform: scaleX(1);
+    }
+
+    50% {
+      transform: scaleX(1.1);
+    }
+  }
+
+  @keyframes mic-bounce {
+
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+
+    50% {
+      transform: translateY(-8px);
+    }
+  }
+
+  @keyframes eye-blink {
+
+    0%,
+    90%,
+    100% {
+      transform: scaleY(1);
+    }
+
+    95% {
+      transform: scaleY(0.1);
+    }
+  }
+
+  --animate-thinking-up: thinking-look-up 2s ease-in-out infinite;
+  --animate-paw-to-ear: paw-to-ear 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  --animate-head-tilt: head-tilt 0.5s ease-out forwards;
+  --animate-pensive-whiskers: pensive-whiskers 3s ease-in-out infinite;
+  --animate-mic-bounce: mic-bounce 1s ease-in-out infinite;
+  --animate-eye-blink: eye-blink 4s ease-in-out infinite;
+
+  @keyframes spin-slow {
+    from {
+      transform: rotate(0deg);
+    }
+
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  --animate-spin-slow: spin-slow 20s linear infinite;
+}
+
+@layer base {
+  body {
+    /* Usamos CSS estándar para evitar errores de compilación con las comas en Tailwind */
+    background: radial-gradient(circle at 20% 20%, #3b66cc 0%, #233969 45%, #0d1426 100%);
+    @apply m-0 min-h-screen font-sans antialiased text-white selection:bg-white selection:text-primary-900;
+  }
+}
+
+@layer components {
+  .glass-effect {
+    background-color: rgba(255, 255, 255, 0.15);
+    backdrop-filter: blur(40px);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    box-shadow: 0 0 40px -10px rgba(255, 255, 255, 0.2);
+    @apply transition-all duration-500 hover:bg-white/20;
+  }
+
+  .pulse-ring {
+    @apply absolute inset-0 rounded-full border-2 border-white animate-ping opacity-60;
+  }
+}

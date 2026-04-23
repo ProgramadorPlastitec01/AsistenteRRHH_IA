@@ -1,0 +1,33 @@
+<service>
+	<id>asistenterrhhiabackend.exe</id>
+	<name>Asistente RRHH IA Backend</name>
+	<description>Backend Node.js para el Kiosco de RRHH que gestiona NotebookLM y Google TTS.</description>
+	<executable>C:\Program Files\nodejs\node.exe</executable>
+	<argument>--harmony</argument>
+	<argument>C:\AI\AsistenteRRHH_IA\node_modules\node-windows\lib\wrapper.js</argument>
+	<argument>--file</argument>
+	<argument>C:\AI\AsistenteRRHH_IA\server.js</argument>
+	<argument>--scriptoptions=</argument>
+	<argument>--log</argument>
+	<argument>Asistente RRHH IA Backend wrapper</argument>
+	<argument>--grow</argument>
+	<argument>0.25</argument>
+	<argument>--wait</argument>
+	<argument>1</argument>
+	<argument>--maxrestarts</argument>
+	<argument>3</argument>
+	<argument>--abortonerror</argument>
+	<argument>n</argument>
+	<argument>--stopparentfirst</argument>
+	<argument>undefined</argument>
+	<logmode>rotate</logmode>
+	<stoptimeout>30sec</stoptimeout>
+	<env name="PORT" value="3000"/>
+	<env name="NODE_ENV" value="production"/>
+	<serviceaccount>
+		<domain>PROGTI01</domain>
+		<user>LocalSystem</user>
+		<password></password>
+	</serviceaccount>
+	<workingdirectory>C:\AI\AsistenteRRHH_IA</workingdirectory>
+</service>
